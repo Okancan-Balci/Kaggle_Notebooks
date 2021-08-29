@@ -1,0 +1,1593 @@
+---
+title: "Titanic Dataset with Ensemble Models"
+author: "Okancan Balcı"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    highlight: pygments
+    df_print: paged
+    toc: true
+    toc_depth: 3
+    code_folding: show
+---
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(caret)
+library(skimr)
+library(GGally)
+library(discrim)
+library(e1071)
+
+options(scipen = 20)
+
+knitr::opts_chunk$set(warning = FALSE,
+                      message = FALSE,
+                      fig.align = "center",
+                      fig.width = 8,
+                      dpi = 100)
+```
+
+# Introduction
+
+This notebook is the part of my "Machine Learning" learning process. This is just an end result of a long and a little bit tedious(fun also) iterative process. I am sharing this because it may look like I always know where to look in the Exploratory Analysis but this is just the end result of me being going back and forth to modelling and re-exploration. I wish I could share all of my trial and errors like a blog or a journal but unfortunately this is very impractical and would be very long.
+
+I originally wanted to apply everything I learned to this data set. However, I felt like that would be a bit excessive for such a small data set like Titanic. So in this notebook you are going to find:
+
+1. Exploratory Data Analysis
+2. Feature Engineering in some sense
+3. A bunch of different models and an ensemble of them
+4. Up Sampling and Down Sampling
+5. Some weird results that I got in modelling phase
+
+Especially most of my trial and errors are just me playing with model formulas. I add some variables, remove some variables, compare results and try to get the best test score.
+
+You are not going to find model training and hyper-parameter optimization in this notebook. I originally did that when I was just playing around with the data set. However, since I used 8 different models and also tried Up Sampling and and Down Sampling methods with the same models, it took a lot of time and this is not very feasible for Kaggle notebooks.
+
+First time I started this notebook, I evaluated my models with the Shuffle and Split method since this data set is very small and the train data is even smaller. Playing with variables and spamming the results to Kaggle was taking too long. Then I decided to find the complete Titanic data set and try to get a test set which is similar to Kaggle's test set. I made sure there was no data leakage. The new test set saved me a lot of time in evaluation. 
+
+I hope you can find some learning value out of this notebook. Thank you for reading.
+
+# Exploratory Data Analysis and Feature Engineering
+
+## Reading the Train Data
+
+```{r}
+titanic <- read_csv("titanic_train.csv")
+```
+
+* Initially let's convert some obvious factor variables.
+
+```{r}
+titanic <- titanic %>% 
+  mutate(across(.cols = c(Sex, Embarked, Survived, Pclass), .fns = as_factor))
+```
+
+## A Brief Look at the Data
+
+```{r}
+head(titanic)
+skim(titanic)
+```
+
+* Imputation is needed for `Age` and `Embarked` variables since they have missing values. Most tree models don't need imputation but I am going to use other family of models such as Neural Nets or Support Vector Machines. 
+
+## Evaluation of Feature Quality and Missing Values
+
+* There might be ways to make `Ticket` variable useful. However, I am afraid it will take considerable amount of time to get information from that variable. For this reason I'll be removing that variable.
+
+* `Name` variable has titles in it. Those title would come handy. Further investigation is needed.
+
+* `PassengerId` is useless and shall be removed.
+
+* Let's have a closer look at `Cabin`. Nearly 80% of it is missing. 
+
+I can't see any way for imputation. Looks like this variable is going to be removed too. I still want to check it against the response variable.
+
+```{r}
+titanic %>% 
+  mutate(is_Cabin_na = as_factor(if_else(is.na(Cabin), 1, 0))) %>%
+  ggplot(aes(Survived, fill = is_Cabin_na))+
+  geom_bar(position = "dodge2")+
+  geom_label(aes(label = round(..prop.., 2), group = is_Cabin_na), stat = "count")+
+  scale_fill_brewer(palette = "Accent")+
+  theme(legend.position = c(0.9, 0.85),
+        legend.background = element_blank())
+
+```
+
+Observations which miss `Cabin` variable have lower survival rates. However, I can't make sure that this pattern will be repeated in the test set so I am dropping the variable completely. 
+
+* A closer look at `Embarked`
+
+```{r}
+summary(titanic$Embarked)
+```
+
+There are many ways to deal with those two missing values. In this case I am going to assign them to the biggest group.
+
+```{r}
+titanic <- titanic %>% 
+  mutate(Embarked = as.character(Embarked),
+         Embarked = if_else(is.na(Embarked), "S", Embarked),
+         Embarked = as_factor(Embarked))
+
+summary(titanic$Embarked) 
+```
+
+Making sure that everything went right.
+
+* A closer look at `Age`
+
+```{r}
+summary(titanic$Age)
+```
+
+We have more missing values in `Age`. There are many options for imputation.
+
+* I can simply fill all missing values with the median value.
+
+* I can use bagging or kNN methods to fill them.
+
+For now I will create a variable which indicates if `Age` variable is missing then decide the imputation method. This variable maybe used in imputation and also can be useful for prediction.
+
+```{r}
+titanic <- titanic %>% 
+  mutate(is_age_na = as_factor(if_else(is.na(Age), 1, 0)))
+```
+
+```{r}
+titanic %>% 
+  ggplot(aes(Survived, fill = is_age_na))+
+  geom_bar(position = "dodge2")+
+  geom_label(aes(label = round(..prop.., 2), group = is_age_na), stat = "count")+
+  scale_fill_brewer(palette = "Accent")+
+  theme(legend.position = c(0.9, 0.85),
+        legend.background = element_blank())
+```
+
+It's the same consideration with the `Cabin` variable. I will be dropping this variable after the imputation.
+
+* Removing variables `Name`, `Ticket`, `Cabin` and `PassengerId`
+
+```{r}
+titanic <- titanic %>% 
+  select(-c(Ticket, Cabin, PassengerId))
+```
+
+Other variables look very useful so let's investigate them deeply.
+
+## Relationship Between Response Variable and Predictors
+
+```{r}
+titanic %>% 
+  ggplot(aes(Survived, fill = Sex))+
+  geom_bar(position = "dodge2")+
+  geom_label(aes(label = round(..prop.., 2), group = Sex), stat = "count")+
+  labs(title = "Survival status by Sex")+
+  scale_fill_brewer(palette = "Accent")+
+  theme(legend.position = c(0.9, 0.85),
+        legend.background = element_blank())
+```
+
+* 81% of males died in the accident. 
+
+* 74% of females survived.
+
+
+```{r}
+titanic %>% 
+  ggplot(aes(Survived, fill = Embarked))+
+  geom_bar(position = "dodge2")+
+  geom_label(aes(label = round(..prop.., 2), group = Embarked), stat = "count",
+             nudge_x = c(-0.3, -0.3, 0, 0, 0.3, 0.3))+
+  labs(title = "Survival status by Embarkment")+
+  scale_fill_brewer(palette = "Accent")+
+  theme(legend.position = c(0.9, 0.85),
+        legend.background = element_blank())
+```
+
+* I want to analyze this variable because boarding may imply where passengers might be situated. In this case, category C has a higher survival rate. That is maybe because those passengers were mostly boarded far away from the crash location. S and Q look very similar and because of that they can be merged into a single category. This might help getting more accurate predictions.
+
+```{r}
+titanic %>% 
+  ggplot(aes(Survived, fill = Pclass))+
+  geom_bar(position = "dodge2")+
+  geom_label(aes(label = round(..prop.., 2), group = Pclass), stat = "count",
+             nudge_x = c(-0.3, -0.3, 0, 0, 0.3, 0.3))+
+  labs(title = "Survival status by Class")+
+  scale_fill_brewer(palette = "Accent")+
+  theme(legend.position = c(0.9, 0.85),
+        legend.background = element_blank())
+```
+
+* Class 3 has the highest death rate. 
+
+* Class 2 doesn't help differentiate Survived status since it is close to 50%. It should be investigated further.
+
+* Class 1 has the highest survival rate.
+
+```{r}
+titanic %>%
+  ggplot(aes(Survived, fill = Sex))+
+  geom_bar(position = "dodge2")+
+  geom_label(aes(label = round(..prop.., 2), group = Sex), stat = "count")+
+  facet_wrap(~Pclass)+
+  labs(title = "Survival status by Class")+
+  scale_fill_brewer(palette = "Accent")+
+  theme(legend.position = c(0.1, 0.85),
+        legend.background = element_blank())
+```
+
+* Pclass 2 and 3 nearly have the same death rate for male category. The difference comes from females of the Pclass 3. This is probably going to create bias for models because for Class 1 and 2 female category has very high survival rate whereas Class 3 doesn't.
+
+```{r}
+titanic %>% 
+  ggplot(aes(Survived, Age))+
+  geom_violin(aes(fill = Survived), show.legend = FALSE)+
+  geom_boxplot(alpha = 0.4, size = 0.4, width = 0.4)+
+  labs(title = "Survival status by Age")+
+  scale_fill_brewer(palette = "Accent")
+```
+
+* Age doesn't really help differentiate the survival status. There is one important thing to note though. Passengers who were below Age 10 had higher survival rates.  In the modelling this should be considered as well.
+
+However, this can change when another variables come into the picture.
+
+```{r}
+titanic %>% 
+  ggplot(aes(Pclass, Age, fill = Survived))+
+  geom_violin(width = 0.7)+
+  geom_boxplot(alpha = 0, width = 0.7, size = 0.3)+
+  geom_label(aes(label = ..count.., group = Survived), y = -5, stat = "count", nudge_x = c(-0.2, 0.2))+
+  facet_wrap(~Sex)+
+  coord_cartesian(ylim = c(-5, 81))+
+  labs(title = "Survival status by Class and Age")+
+  scale_fill_brewer(palette = "Accent")+
+  theme(legend.position = c(0.9, 0.85),
+        legend.background = element_blank())
+```
+
+* This plot gives a clearer picture. For classes 1 and 2 survival rate is very high for males who were below age 18. Unfortunately this is not true for class 3 but it's still observable that child males had higher survival rates.
+
+* A similar pattern could be seen for female category but it is not as strong as male counterpart. Furthermore, we don't need to adjust for child females because models will likely predict them as survived. This is not the case for males.
+
+
+```{r}
+titanic %>% 
+  ggplot(aes(Survived, Fare))+
+  geom_boxplot(aes(fill = Survived), show.legend = FALSE)+
+  labs(title = "Survival status by Fare")+
+  scale_fill_brewer(palette = "Accent")
+```
+
+* Many observations could be considered as outliers. I am going to create a new fare variable where upper limit exists, probably 90% quantile. Maybe it helps with the models.
+
+* Survival Rate gets higher as fares increase. This might change if Pclass is taken into consideration again.
+
+```{r}
+titanic %>% 
+  ggplot(aes(Pclass, Fare, fill = Survived))+
+  geom_boxplot()+
+  labs(title = "Survival status by Fare and Class")+
+  scale_fill_brewer(palette = "Accent")+
+  theme(legend.position = c(0.9, 0.85),
+        legend.background = element_blank())
+```
+
+* For Pclass 1 `Fare` correlates with survival. For Pclass 2 it still has some correlation but not as stonf as Pclass1. However, because of the presence of very high values it's not really healthy to comment on this plot. We'll come back to this variable.
+
+```{r, results='hold'}
+titanic %>% 
+  ggplot(aes(as.factor(SibSp), fill = Survived))+
+  geom_bar(position = "dodge2")+
+  labs(title = "Survival status by the number of Siblings or Spouses",
+       x = "Sibling or Spouse")+
+  scale_fill_brewer(palette = "Accent")+
+  theme(legend.position = c(0.9, 0.85),
+        legend.background = element_blank())
+
+titanic %>% 
+  ggplot(aes(as.factor(Parch), fill = Survived))+
+  geom_bar(position = "dodge2")+
+  labs(title = "Survival status by the number of Parents or Children",
+       x = "Parents or Children")+
+  scale_fill_brewer(palette = "Accent")+
+  theme(legend.position = c(0.9, 0.85),
+        legend.background = element_blank())
+```
+
+* It could be a good idea to merge `SibSp`(Sibling/Spouse) and `Parch` (Parents/Children) since they both have the similar distributions.
+
+```{r}
+titanic <- titanic %>% 
+  mutate(Relatives = SibSp + Parch)
+```
+
+```{r}
+titanic %>% 
+  ggplot(aes(as.factor(Relatives), fill = Survived))+
+  geom_bar(position = "dodge2")+
+  labs(title = "Survival status by the number of Relatives",
+       x = "Relatives")+
+  scale_fill_brewer(palette = "Accent")+
+  theme(legend.position = c(0.9, 0.85),
+        legend.background = element_blank(),
+        legend.title = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        axis.title = element_text(size = 14))
+```
+
+* It seems like crowded families had disadvantage but the number of occurrences are small. Lone travelers also had higher death rates. However, people who were travelling with 3 people at max have higher survival rates. That is maybe because a compact group of people could help themselves better in the chaos of Titanic.
+
+I think there are two options :
+
+* I keep `Relatives` as a continuous variable
+
+* I merge similar levels and factorize it. Here 0, 1-3 and +4 look different.
+
+
+```{r}
+titanic %>% 
+  mutate(Rel2 = as.factor(case_when(
+    Relatives == 0 ~ "0",
+    Relatives > 0 & Relatives < 4 ~ "123",
+    Relatives > 3 ~ "4gr"
+  ))) %>% 
+  ggplot(aes(Rel2, fill = Survived))+
+  geom_bar(position = "dodge2")+
+  labs(title = "Survival status by the number of Relatives",
+       x = "Relatives")+
+  scale_fill_brewer(palette = "Accent")+
+  theme(legend.position = c(0.9, 0.85),
+        legend.background = element_blank())
+```
+
+I am going to keep both variables and try to find out which one is better iteratively. I'll also remove `SibSp` and `Parch` variables.
+
+Lastly, I want to analyze the titles. I am going to separate sexes in order to prevent too much clutter on plots.
+
+```{r}
+titanic %>%
+  mutate(Titles = str_split(Name, pattern = ",|\\.",simplify = TRUE )[, 2]) %>% 
+  filter(Sex == "female") %>% 
+  ggplot(aes(y= Titles, fill = Survived))+
+  geom_bar(position = "dodge2") +
+  geom_text(aes(label = ..count..), stat = "count", hjust = "inward")+
+  facet_wrap(~Pclass)+
+  labs(title = "Survival by Female Titles and Class", y = NULL, x = NULL)+
+  scale_fill_brewer(palette = "Accent")+
+  theme(legend.position = c(0.9, 0.9),
+        legend.background = element_blank())
+
+```
+
+I think for female titles there is nothing helping me explain the difference between survival status of classes. Model will highly likely predict most of the female category as survived, unfortunately "Mrs" and "Miss" aren't enough to overcome this bias.
+
+```{r}
+ titanic %>%
+  mutate(Titles = str_split(Name, pattern = ",|\\.",simplify = TRUE )[, 2]) %>% 
+  filter(Sex == "male") %>% 
+  ggplot(aes(y= Titles, fill = Survived))+
+  geom_bar(position = "dodge2") +
+  geom_text(aes(label = ..count..), stat = "count", nudge_y = c(-0.2, 0.2), hjust = "inward")+
+  facet_wrap(~Pclass) +
+  labs(title = "Survival by Male Titles and Class", y = NULL, x = NULL)+
+  scale_fill_brewer(palette = "Accent")+
+  theme(legend.position = c(0.9, 0.15),
+        legend.background = element_blank())  
+```
+
+This time I am looking for the exact opposite situation. Because of the class unbalance males highly likely to be predicted as dead. Again I am not seeing anything except for "Master" and after some research I learned that title master used for young boys at that time. So creating a variable which marks child males would be more effective. I am discarding the `Name` variable.
+
+```{r}
+titanic <- titanic %>% 
+  select(-Name)
+```
+
+
+## Creating new Variables or Manipulating Existing Ones
+
+* Categorizing `Relative` variable
+ 
+```{r}
+titanic <- titanic %>% 
+  mutate(Rel = as.factor(case_when(
+    Relatives == 0 ~ "0",
+    Relatives > 0 & Relatives < 4 ~ "123",
+    Relatives > 3 ~ "4gr"
+  )))
+
+titanic <- titanic %>% 
+  select(-c(SibSp, Parch))
+```
+
+* Merging Embarked S and Embarked Q since they had similar distributions.
+
+```{r}
+titanic <- titanic %>% 
+  mutate(Emb_m = fct_collapse(Embarked, SQ = c("S", "Q"), C = "C"))
+```
+
+* Limiting the upper values of `Fare` variable by taking `Pclass` into consideration. I limited the variable 90% percentile of the original.
+
+```{r}
+fare_quant <- titanic %>% 
+  group_by(Pclass) %>% 
+  summarise(
+    quan = quantile(Fare, probs = 0.9)
+  ) %>% pull(quan)
+
+titanic <- titanic %>% 
+  mutate(Fare2 = case_when(
+    Fare >= fare_quant[[1]] & Pclass == 1 ~ fare_quant[[1]],
+    Fare >= fare_quant[[2]] & Pclass == 2 ~ fare_quant[[2]], 
+    Fare >= fare_quant[[3]] & Pclass == 3 ~ fare_quant[[3]],
+    TRUE ~ Fare
+  ))
+```
+
+```{r}
+titanic %>% 
+  ggplot(aes(Pclass, Fare2, fill = Survived))+
+  geom_boxplot()+
+  labs(title = "Fare Limited")+
+  scale_fill_brewer(palette = "Accent")+
+  theme(legend.position = c(0.9, 0.85),
+        legend.background = element_blank())
+```
+
+* Without very high values it's easier to see the relationship between Class, Fare and Survival. 
+
+* Lastly I want to check correlations between numeric variables.
+
+```{r}
+titanic %>% 
+  select(where(is.numeric), -Fare2) %>% 
+  ggcorr(label = T, low = "#40004B", high = "#00441B")
+```
+
+* No high correlation exist between numeric variables. To compare categorical variables we need more advanced techniques which are out of scope of this notebook. 
+
+Lastly I want to create a non-pre-processed backup data to use in re-exploration. I do this because it is not easy to work with one-hot encoded and normalized variables.
+
+```{r}
+titanic2 <- titanic
+```
+
+
+## Pre-processing the Data
+
+Some models such as Support Vector Machines, Neural Nets or Logistic Regression work better with pre-processed data. Three actions will be taken in this phase:
+
+* One Hot Encode
+
+* Normalize Variables
+
+* Impute for `Age` variable
+
+### One Hot Encoding:
+
+```{r}
+dummy <- dummyVars(~., data = titanic[, -1])
+
+titanic <- as_tibble(predict(dummy, titanic[, -1])) %>% 
+  bind_cols(Survived = titanic$Survived)
+
+head(titanic)
+```
+
+### Imputation
+
+Here I impute with the method of Bagging. I am only using the original values in this process.
+
+```{r}
+set.seed(11)
+pre.process <- preProcess(titanic[,-(13:20)], method = "bagImpute")
+
+titanic <- predict(pre.process, titanic)
+
+summary(titanic$Age)
+```
+
+
+We can confirm that NA values are filled. 
+
+### Creating Bias Variables
+
+Earlier in the exploration process we caught some biases such as:
+
+* Child Males had higher survival chance
+
+* Females in the Pclass 3 weren't as fortunate as other classes. 
+
+* Pclass 1 Males had higher survival rate. 
+
+I am going to create those variables to inform the models about aforementioned biases. I am creating more than I need but this is the part of the trial and error process. We'll see which variable performs better.
+
+```{r}
+titanic <- titanic %>% 
+  mutate(youngMale2 = ifelse(Age < 20 & Sex.male == 1 & Pclass.2 == 1, 1, 0),
+         youngMale3 = ifelse(Age < 20 & Sex.male == 1 & Pclass.3 == 1, 1, 0),
+         oldFemale3 = ifelse(Age > 30 & Sex.female == 1 & Pclass.3 == 1, 1, 0),
+         Female3 = ifelse(Sex.female == 1 & Pclass.3 == 1, 1, 0),
+         oldMale1 = ifelse(Age > 38 & Sex.male == 1 & Pclass.1 == 1, 1, 0),
+         childMale = ifelse(Age < 10 & Sex.male == 1, 1, 0),
+         Male3 = ifelse(Pclass.3 == 1 & Sex.male == 1, 1, 0),
+         Male1 = ifelse(Pclass.1 == 1 & Sex.male == 1, 1, 0))
+```
+
+
+### Normalize Numeric Variables
+
+```{r}
+normalize <- preProcess(titanic, method = "range")
+
+titanic <- predict(normalize, titanic)
+```
+
+# Preparing the Test Data
+
+This is the test data I got from complete data set. In this section I am going to repeat every step I took in the Feature Engineering section.
+
+* Reading and matching the data with the original test set. Here I did my best to get the complete test set but I missed 4 observations.
+
+```{r}
+titanic_test <- read_csv("titanic_complete.csv") %>% 
+  mutate(age = as.numeric(age)) %>% 
+  inner_join(read_csv("titanic_test.csv"),
+             by = c("sex" = "Sex" ,"age" = "Age", "ticket" = "Ticket", "sibsp" = "SibSp",
+                                                  "embarked" = "Embarked", "pclass" = "Pclass", "parch" = "Parch",
+                                                  "fare" = "Fare")) %>% 
+  arrange(PassengerId) %>% 
+  mutate(dup = duplicated(PassengerId)) %>% 
+  filter(dup == 0) %>% 
+  select(pclass, survived, sex, age, sibsp, parch, fare, embarked)
+
+names(titanic_test) <- str_to_title(names(titanic_test))
+
+titanic_test <- titanic_test %>% 
+  rename(SibSp = Sibsp)
+```
+
+* Converting some variables to factors.
+
+```{r}
+titanic_test <- titanic_test %>% 
+  mutate(across(.cols = c(Sex, Embarked, Pclass), .fns = as_factor))
+```
+
+* Merging the `Embarked` variable
+
+```{r}
+titanic_test <- titanic_test %>% 
+  mutate(Emb_m = fct_collapse(Embarked, SQ = c("S", "Q"), C = "C"))
+```
+
+
+```{r}
+titanic_test <- titanic_test %>% 
+  mutate(is_age_na = as_factor(if_else(is.na(Age), 1, 0)))
+```
+
+* Creating the `Relatives` variable 
+
+```{r}
+titanic_test <- titanic_test %>% 
+  mutate(Relatives = SibSp + Parch)
+```
+
+* Categorizing the `Relatives` variable
+
+```{r}
+titanic_test <- titanic_test %>% 
+  mutate(Rel = as.factor(case_when(
+    Relatives == 0 ~ "0",
+    Relatives > 0 & Relatives < 4 ~ "123",
+    Relatives > 3 ~ "4gr"
+  )))
+
+titanic_test <- titanic_test %>% 
+  select(-c(SibSp, Parch))
+```
+
+* Imputing the single missing `Fare` value with the median `Fare` value.
+
+```{r}
+titanic_test <- titanic_test %>% 
+  mutate(Fare = if_else(is.na(Fare), median(Fare, na.rm = T), Fare))
+```
+
+* Creating a new `Fare` variable which has upper limits by class.
+
+```{r}
+fare_quant <- titanic_test %>% 
+  group_by(Pclass) %>% 
+  summarise(
+    quan = quantile(Fare, probs = 0.9)
+  ) %>% pull(quan)
+
+titanic_test <- titanic_test %>% 
+  mutate(Fare2 = case_when(
+    Fare >= fare_quant[[1]] & Pclass == 1 ~ fare_quant[[1]],
+    Fare >= fare_quant[[2]] & Pclass == 2 ~ fare_quant[[2]], 
+    Fare >= fare_quant[[3]] & Pclass == 3 ~ fare_quant[[3]],
+    TRUE ~ Fare
+  ))
+```
+
+* Creating another data frame in order to use in model evaluation
+
+```{r}
+titanic_test2 <- titanic_test %>% 
+  select(Survived, Pclass, Sex, Age, Fare, Embarked, Relatives)
+```
+
+* One-hot Encoding the data
+
+```{r}
+dummy <- dummyVars(~., data = titanic_test)
+titanic_test <- as_tibble(predict(dummy, titanic_test))
+```
+
+* Imputation for `Age` variable
+
+```{r}
+set.seed(11)
+pre.process <- preProcess(titanic_test[, names(titanic_test) %in% c("Pclass.1", "Pclass.2", "Pclass.3", "Sex.male",
+                                                          "Sex.female", "Age", "Fare", "Embarked.Q", "Embarked.S", "Embarked.C",
+                                                          "is_age_na.0", "is_age_na.1")],
+                          method = "bagImpute")
+
+titanic_test <- predict(pre.process, titanic_test)
+```
+
+* Creating bias variables
+
+```{r}
+titanic_test <- titanic_test %>% 
+  mutate(youngMale2 = ifelse(Age < 20 & Sex.male == 1 & Pclass.2 == 1, 1, 0),
+         youngMale3 = ifelse(Age < 20 & Sex.male == 1 & Pclass.3 == 1, 1, 0),
+         oldFemale3 = ifelse(Age > 30 & Sex.female == 1 & Pclass.3 == 1, 1, 0),
+         Female3 = ifelse(Sex.female == 1 & Pclass.3 == 1, 1, 0),
+         oldMale1 = ifelse(Age > 38 & Sex.male == 1 & Pclass.1 == 1, 1, 0),
+         childMale = ifelse(Age < 10 & Sex.male == 1, 1, 0),
+         Male3 = ifelse(Pclass.3 == 1 & Sex.male == 1, 1, 0),
+         Male1 = ifelse(Pclass.1 == 1 & Sex.male == 1, 1, 0))
+
+```
+
+* Normalizing the numeric variables
+
+```{r}
+normalize <- preProcess(titanic_test, method = "range")
+
+titanic_test <- predict(normalize, titanic_test)
+```
+
+```{r}
+titanic_test <- titanic_test %>% 
+  mutate(Survived = as.factor(Survived))
+```
+
+# Model Fitting 
+
+In this section I'll be doing two main things:
+
+1. Talk about variables and their interactions with models
+
+2. Evaluate the models by reading the confusion matrices
+
+## Logistic Regression
+
+```{r}
+fit.logis.f <- logistic_reg(mode = "classification") %>% 
+  set_engine("glm") %>% 
+  fit(Survived ~ Sex.male + Rel.0 + Rel.123 + childMale + Pclass.1 + Pclass.2 + Male1,
+      data = titanic)
+```
+
+Logistic Regression hates when you include all one hot encoded variables in the formula. The reason is that they are correlated perfectly with each other. For instance `Sex.male` and `Sex.female`, these variables are perfectly negatively correlated. It's enough to include only one within your formula as I did with `Sex.male`. To generalize, it if your factor variable has N levels then only include N-1 as I did with `Rel` or `Pclass` variables.
+
+Among the bias variables I created the best one was `childMale`. It increased the accuracy of every single model and this makes sense since in Exploratory Analysis we saw that child males had higher survival rates.
+
+The other variables were less consistent. Some worked well with some models and some didn't. In this case `Male1` increased the accuracy. This also makes sense because Class 1 males had higher survival rates. I couldn't get value from other bias variables.
+
+Among the normal variables `Sex` was the best for every model. The factor version of `Relatives` performed quite well. And of course `Pclass` but this variable sometimes made the predictions worse for other models.
+
+```{r}
+predictions <- predict(fit.logis.f, new_data = titanic_test) %>% 
+  rename(fit.logis.f = .pred_class)
+```
+
+```{r}
+confusionMatrix(predictions$fit.logis.f,
+                as.factor(titanic_test$Survived), mode = "everything")
+```
+
+### Disecting the Confusion Matrix and Classification Statistics
+
+Finally, we fit our first model and got the results. `confusionMatrix()` function gives quite bit of information and I want to explain the most common ones starting with the Confusion Matrix.
+
+The confusion matrix was really "confusing" for me when I first time saw it but it is actually very easy to understand especially for the 2 class case. We can mainly get 4 numbers from the confusion matrix which are "True Positives", "True Negatives", "False Positives" and "False Negatives".
+
+* `True Positive` cases are on the top-left of the confusion matrix. In plain English, our model could identify 216 people who lost their lives in the accident correctly.
+
+* `False Positive` cases are on the top-right. In this case the model identified 46 people as if they died in the accident but in truth those people actually survived.
+
+* `True Negative` cases are on the bottom-right. Survival of 109 people are correctly identified by the model.
+
+* `False Negative` cases are on the bottom-left. In this case, our model thought 43 people survived but unfortunately those people lost their lives in the accident.
+
+With the help of `TP`, `FP`, `TN` and `FN` we can create more metrics to evaluate our model. Let's start with `Accuracy`. 
+
+$$Accuracy = \frac{TP + TN}{TP+FP+TN+FN} = \frac{216+109}{216+46+109+43}=0.785$$
+
+Accuracy is by far the most popular metric but it should be used with caution when dealing with unbalanced data sets. Titanic isn't terribly unbalanced (60% to 40%) so it is okay to use it as an evaluation metric.
+
+`Kappa` is your friend when you are dealing with an unbalanced data set. Its explanation is a little bit verbose so I am leaving a very nice explanation link from Stack Exchange [**here**](https://stats.stackexchange.com/questions/82162/cohens-kappa-in-plain-english). The explanation might seem long but it is super easy to understand. As a rule of thumb though, 50% to 70% could be considered as good and a kappa value which is over 70% could be considered as very good. However, as your data set gets more and more unbalanced even a kappa value of 40% could be considered as very good. So it depends.
+
+$$Sensitivity = Recall = \frac{TP}{TP+FN} = \frac{216}{216+43} = 0.834$$
+
+"Out of all people who **couldn't survive** the accident, how many of them were identified correctly by the model?" Sensitivity and Recall answers this question. Our model has a nice Sensitivity but be aware that more people died in the accident this means that our models will naturally have high sensitivity anyways. This brings us to Specificity which is the opposite perspective of the Sensitivity.
+
+$$Specificity = \frac{TN}{TN+FP} = \frac{109}{109+46} = 0.7032$$
+
+Specificity answers this question: "Out of all people who **survived** the accident, how many of them were identified correctly by the model?". In this case our model has lower Specificity. 70% isn't terrible but it tells us that the model marginally worse at predicting people who actually survived the accident.
+
+`Balanced Accuracy` is just a mean of `Sensitivity` and `Specificity`.
+
+$$Positive\ Predictive\ Value = Precision = \frac{TP}{TP+FP} = \frac{216}{216+46} = 0.8244\\False\ Discovery\ Rate = 1- Precision = 0.1756$$
+
+"Out of all **predictions** which identify people who **couldn't survive**, how many of them were identified correctly?" This metric actually gives an idea about the quality of model's positive predictions. In this case the model is not bad at this. Ideally you would want a model which has 100% Sensitivity and 100% Precision but usually there is a trade off between these two metrics. So as one increases the other decreases. The decision of having a precise or sensitive model usually boils down to the objective at the hand. You also get `False Discovery Rate` by subtracting `Precision` from 1.
+
+$$Negative\ Predictive\ Value = \frac{TN}{TN+FN} = \frac{109}{109+43} = 0.7171 \\ False\ Omision\ Rate = 1- NPV = 0.2829$$
+
+NPV is the opposite of the PPV and answers this question "Out of all **predictions** which identify people who **survived**, how many of them were identified correctly?". Again since the data is kind of unbalanced the model is bad at detecting people who actually survived.
+
+$$F1\ Score = 2 \times \frac{Precision \times Recall}{Precision + Recall} = 2 \times \frac{0.8244 \times 0.8340}{0.8244 + 0.8340} = 0.8292$$
+
+I mentioned the trade off between `Precision` and `Recall` above. `F1 Score` is just for that. It is the harmonic mean of the `Precision` and `Recall`. So if you want to balance `Positive Prediction Value`(Precision) and `Sensitivity`(Recall) and select a model which maximizes this balance you go for `F1 Score`. In this case, we don't really need it but it is okay to take a peek at this statistic.
+
+`Prevalence` is very easy. It is the rate of people who couldn't survive the accident over all observations. 
+
+`Detection Rate` is like prevalence but only with true positives.
+
+$Detection Rate = \frac{TP}{TP+FP+TN+FN}$
+
+`Detection Prevalence` is like detection rate but false positives added to it 
+
+$Detection Prevalence = \frac{TP+ FP}{TP+FP+TN+FN}$
+
+
+## XGBoost
+
+```{r}
+fit.xgb.f <- boost_tree(mode = "classification") %>% 
+  set_engine("xgboost") %>% 
+  fit(Survived ~ Sex.male  + Pclass.1 + Pclass.2 + Pclass.3 + Rel.0 + Rel.123 + Rel.4gr + Embarked.S + Embarked.C + Embarked.Q + childMale,
+      data = titanic)
+```
+
+Extreme Gradient Boosting is a tree based algorithm. Formula wise I think tree-based models just like everything thrown at them. In this case you can see more variables in the formula. Only `childMale` worked and increased the accuracy among bias variables.
+
+```{r}
+predictions <- predictions %>% 
+  bind_cols(fit.xgb.f = predict(fit.xgb.f, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions$fit.xgb.f,
+                as.factor(titanic_test$Survived), mode = "everything")
+```
+
+To compare with the Logistic Regression, XGBoost has tiny bit of more accuracy but the predictions are very different. In this case XGB has higher Sensitivity but lower Specificity than Logistic Regression. Thus, Logistic Regression is better at predicting passengers who survived whereas XGB is better at the opposite case.  
+
+
+## Random Forest
+
+```{r}
+set.seed(15)
+fit.rf.f <- rand_forest(mode = "classification") %>% 
+  set_engine("randomForest") %>% 
+  fit(Survived ~ Sex.female + Pclass.1 + Pclass.2 + Pclass.3 + Fare + Age + childMale + youngMale3 + Male3 + Embarked.S + Embarked.C + Rel.0 + Rel.123,
+      data = titanic)
+```
+
+Random Forest is another type of tree based model. It is the ensemble of individual decision trees. If you look at the formula you can see there are many more variables. This time I could make use of more bias variables like `childMale`, `youngMale3` and `Male3`. These are very similar variables. Usually I would think that this would decrease the model performance. I think the reason why it didn't in this case is that Random Forest gets a subset of variables and build decision trees with different subsets.
+
+The other interesting thing is that including the smallest group of a factor variable actually decreased the accuracy. For example `Rel.0`, `Rel.123` and `Rel.4gr`. These variables are the one-hot encoded version of `Rel` which had 3 levels. `Rel.4gr` has by far the least amount of observations. I think `Rel.4gr` introduced some noise that Random Forest couldn't handle. The opposite situation is valid for XGBoost. That time incorporating `Rel.4gr` increased the accuracy.
+
+The order of the variables in the formula changed the test results a little bit. I think that's because in every seed RF subsets different variables to build decision trees. So maybe that subset order matters. This is just a note I don't have all the answers at this moment. 
+
+```{r}
+predictions <- predictions %>% 
+  bind_cols(fit.rf.f = predict(fit.rf.f, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions$fit.rf.f,
+                as.factor(titanic_test$Survived), mode = "everything")
+```
+
+So far Random Forest has the best accuracy. It has more balanced Sensitivity and Specificity and Precision is looking fine as well. Overall that's a good model.
+
+For the upcoming models I am not going to report everything you can see from the confusion matrix again and again because I feel I gave the idea of my evaluation process.
+
+## Neural Nets
+
+```{r}
+set.seed(19)
+fit.nn.f <- mlp(mode = "classification") %>% 
+  set_engine("nnet") %>% 
+  fit(Survived ~ Sex.male + Sex.female + Age + Fare + Pclass.1 + Pclass.2 + Pclass.3 + Embarked.S + Embarked.C + Rel.0 + Rel.123 +  childMale + Male3 + youngMale3 + Female3,
+      data = titanic)
+```
+
+Neural Nets made the most out of bias variables. You can see that I used nearly every bias variable I created. Less prevalent factor categories decreased the accuracy like it did with Random Forests too. That's why there is no `Rel.4gr` and `Embarked.Q`.
+
+One thing to note is that the order of the variables in the formula affected the accuracy. I am not equipped to answer this question yet but I wanted to note.
+
+```{r}
+predictions <- predictions %>% 
+  bind_cols(fit.nn.f = predict(fit.nn.f, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions$fit.nn.f,
+                as.factor(titanic_test$Survived), mode = "everything")
+```
+
+
+
+## Radial Support Vector Machines
+
+```{r}
+set.seed(19)
+fit.svm.f <- svm_rbf(mode = "classification") %>% 
+  set_engine("kernlab") %>% 
+  fit(Survived ~ Sex.male + Pclass.1 + Pclass.2 + Rel.0 + Rel.123 + childMale + Fare + youngMale2,
+      data = titanic)
+```
+
+```{r}
+predictions <- predictions %>% 
+  bind_cols(fit.svm.f = predict(fit.svm.f, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions$fit.svm.f,
+                as.factor(titanic_test$Survived), mode = "everything")
+```
+
+## Nearest Neighbor
+
+```{r}
+set.seed(11)
+fit.knn.f <- nearest_neighbor(mode = "classification") %>% 
+  set_engine("kknn") %>% 
+  fit(Survived ~ Sex.male + Relatives + childMale + youngMale3 + Female3,
+      data = titanic)
+```
+
+```{r}
+predictions <- predictions %>% 
+  bind_cols(fit.knn.f = predict(fit.knn.f, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions$fit.knn.f,
+                as.factor(titanic_test$Survived), mode = "everything")
+```
+
+## Naive Bayes
+
+```{r}
+fit.nb.f <- naive_Bayes(mode = "classification") %>% 
+  set_engine("klaR") %>% 
+  fit(Survived ~ Sex.male  + Pclass.1 + Pclass.2 + Pclass.3 + childMale + Male3,
+      data = titanic)
+```
+
+```{r}
+predictions <- predictions %>% 
+  bind_cols(fit.nb.f = predict(fit.nb.f, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions$fit.nb.f,
+                as.factor(titanic_test$Survived), mode = "everything")
+```
+
+The results of Naive Bayes is very interesting. Every time I played with Naive Bayes it always had very high Sensitivity values. As you can see here it only missed 8 ground truth positive cases. However this strength comes with many weaknesses. The model has horrible Specificity. Precision is not terrible but also not great. In conclusion, what this model does is that it casts a very big net and pulls everything from the ocean. That net brings many fish but also it comes with thrash, sand or stones.
+
+
+## Decision Tree
+
+```{r}
+fit.dtree.f <- decision_tree(mode = "classification") %>% 
+  set_engine("C5.0") %>% 
+  fit(Survived ~ Sex.male + Pclass.1 + Pclass.2 + Pclass.3 + Age + Fare + childMale + Rel.0 + Rel.123 + Rel.4gr + youngMale3,
+      data = titanic)
+```
+
+```{r}
+predictions <- predictions %>% 
+  bind_cols(fit.dtree.f = predict(fit.dtree.f, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions$fit.dtree.f,
+                as.factor(titanic_test$Survived), mode = "everything")
+```
+
+
+## Ensemble Models
+
+Let's group together all models we fit so far and let them democratically predict what's what. I am leaving Decision Tree out because in this case having odd number of models is important for voting process. Voting process goes like this. Simply, rows are summed and if this sum is greater than 3.5 than the prediction is 1 and vice versa.
+
+```{r}
+ensemble_preds <- predictions %>% 
+  select(-fit.dtree.f) %>% 
+  mutate(across(everything(), as.character)) %>% 
+  mutate(across(everything(), as.double)) %>% 
+  mutate(ensemble = rowSums(across(everything()))) %>% 
+  mutate(preds = if_else(ensemble > 3.5, 1, 0)) %>% 
+  select(preds) %>% 
+  mutate(preds = as_factor(preds)) %>% 
+  pull(preds)
+```
+
+```{r}
+confusionMatrix(ensemble_preds, as.factor(titanic_test$Survived),
+                mode = "everything")
+```
+
+Unfortunately the ensemble couldn't beat the Random Forest, the accuracy is the same. However, we can't say it is worse. If you think about the accuracy scores of models other than Random Forest, none of them were over 79%, yet the ensemble of them scores just above 80%. I've seen cases where the ensemble scored way higher than any model that it includes. 
+
+This ensemble predicted one more positive case but it lost one negative case compared to Random Forest.
+
+
+### Ensemble Evaluation
+
+Across all models we encountered high Sensitivity but relatively lower Specificity values. This means that those models could detect passengers who couldn't survive better than people who could. It was expected from the beginning because the prevalence of the positive class was 62%. You can see this in the output of the confusion matrix function as well. We can try to overcome this problem mainly with two alternative methods.
+
+* Down Sampling - We can equalize the number of the survivors and the deceased by getting equal amount of observations from the prevalent class. In this case we are sacrificing observations.
+
+* Up sampling - This is the opposite of down sampling. This time we bootstrap the little group with replacement so that we can increase the number of observations and equalize them with the prevalent class artificially. 
+
+Before I start with Down and Up Sampling, I want to take a closer look at False Positives and False Negatives in order to see the model's failings.
+
+Starting with False Positives. The cases where the model predicted passengers as if they couldn't survive but actually they survived.
+
+```{r}
+titanic_test2 %>% 
+  mutate(prediction = ensemble_preds) %>% 
+  filter(Survived == 1 & prediction == 0) %>% 
+  group_by(Pclass, Sex) %>% 
+  count()
+```
+
+The model mostly failed predicting the survival of Class 1 and 3 Male passengers. Let's get a sample of this data.
+
+```{r}
+set.seed(12)
+titanic_test2 %>% 
+  mutate(prediction = ensemble_preds) %>% 
+  filter(Survived == 1 & prediction == 0) %>% 
+  slice_sample(n = 10)
+```
+
+I can't really catch anything to explain the survival of these people neither. I think this is the case of lack of data. Those people probably had some variable which helped them survive the accident. Maybe that was the position, proximity to escape route to the higher docks etc.
+
+```{r}
+titanic_test2 %>% 
+  mutate(prediction = ensemble_preds) %>% 
+  filter(Survived == 0 & prediction == 1) %>% 
+  group_by(Pclass, Sex) %>% 
+  count()
+```
+
+# Model Fitting with Down Sampling
+
+Trying to solve Specificity problems .
+
+## Creating a down sampled training set
+
+```{r}
+set.seed(31)
+titanic.down <- downSample(x = titanic[, names(titanic) != "Survived"], y = titanic$Survived,
+           list = FALSE, yname = "Survived")
+```
+
+```{r}
+titanic.down %>% 
+  group_by(Survived) %>% 
+  count()
+```
+
+
+## Logistic Regression *
+
+```{r}
+fit.logis.f.d <- logistic_reg(mode = "classification") %>% 
+  set_engine("glm") %>% 
+  fit(Survived ~ Sex.male  + Rel.0 + Rel.123 + childMale + Pclass.1 + Pclass.2 + Male1 + oldFemale3 + Embarked.S +Embarked.C,
+      data = titanic.down)
+```
+
+```{r}
+predictions_down <- tibble(fit.logis.f.d = predict(fit.logis.f.d, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions_down$fit.logis.f.d,
+                as.factor(titanic_test$Survived), mode = "everything")
+```
+
+## XGBoost *
+
+```{r}
+fit.xgb.f.d <- boost_tree(mode = "classification") %>% 
+  set_engine("xgboost") %>% 
+  fit(Survived ~ Sex.male  + Pclass.1 + Pclass.2 + Pclass.3 + Rel.0 + Rel.123 + Rel.4gr + Embarked.S + Embarked.C  + childMale,
+      data = titanic.down)
+```
+
+```{r}
+predictions_down <- predictions_down %>% 
+  bind_cols(fit.xgb.f.d = predict(fit.xgb.f.d, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions_down$fit.xgb.f.d,
+                titanic_test$Survived, mode = "everything")
+```
+
+
+## Random Forest *
+
+```{r}
+set.seed(15)
+fit.rf.f.d <- rand_forest(mode = "classification") %>% 
+  set_engine("randomForest") %>% 
+  fit(Survived ~ Sex.male + childMale + Rel.0 + Rel.123 + Rel.4gr + Female3,
+      data = titanic.down)
+```
+
+```{r}
+predictions_down <- predictions_down %>% 
+  bind_cols(fit.rf.f.d = predict(fit.rf.f.d, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions_down$fit.rf.f.d,
+                titanic_test$Survived, mode = "everything")
+```
+
+## Neural Nets * 
+
+
+```{r}
+set.seed(19)
+fit.nn.f.d <- mlp(mode = "classification") %>% 
+  set_engine("nnet") %>% 
+  fit(Survived ~ Sex.male  + Fare + Pclass.1 + Pclass.2 + Pclass.3  + Rel.0 + Rel.123 + Rel.4gr +  childMale  + Male3 + youngMale3 + Female3,
+      data = titanic.down)
+```
+
+```{r}
+predictions_down <- predictions_down %>% 
+  bind_cols(fit.nn.f.d = predict(fit.nn.f.d, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions_down$fit.nn.f.d,
+                titanic_test$Survived, mode = "everything")
+```
+
+
+## Support Vector Machines
+
+```{r}
+set.seed(19)
+fit.svm.f.d <- svm_rbf(mode = "classification") %>% 
+  set_engine("kernlab") %>% 
+  fit(Survived ~ Sex.male + Pclass.1 + Pclass.2  + Rel.0 + Rel.123 + childMale + Embarked.S + Embarked.C,
+      data = titanic.down)
+```
+
+```{r}
+predictions_down <- predictions_down %>% 
+  bind_cols(fit.svm.f.d = predict(fit.svm.f.d, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions_down$fit.svm.f.d,
+                titanic_test$Survived, mode = "everything")
+```
+
+
+## Nearest Neighbor
+
+```{r}
+set.seed(11)
+fit.knn.f.d <- nearest_neighbor(mode = "classification") %>% 
+  set_engine("kknn") %>% 
+  fit(Survived ~ Sex.male + childMale + Female3 + Age + youngMale3,
+      data = titanic.down)
+```
+
+```{r}
+predictions_down <- predictions_down %>% 
+  bind_cols(fit.knn.f.d = predict(fit.knn.f.d, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions_down$fit.knn.f.d,
+                titanic_test$Survived, mode = "everything")
+```
+
+Spec decreased and Acc increased wut.
+
+## Naive Bayes *
+
+```{r}
+fit.nb.f.d <- naive_Bayes(mode = "classification") %>% 
+  set_engine("klaR") %>% 
+  fit(Survived ~ Sex.male  + Pclass.1 + Pclass.2 + Pclass.3 + childMale + Rel.0 + Rel.123 + oldMale1,
+      data = titanic.down)
+```
+
+```{r}
+predictions_down <- predictions_down %>% 
+  bind_cols(fit.nb.f.d = predict(fit.nb.f.d, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions_down$fit.nb.f.d,
+                titanic_test$Survived, mode = "everything")
+```
+
+This had the biggest response to the variables.
+
+
+## Decision Tree
+
+```{r}
+fit.dtree.f.d <- decision_tree(mode = "classification") %>% 
+  set_engine("C5.0") %>% 
+  fit(Survived ~ Sex.male + Pclass.1 + Pclass.2 + Pclass.3 + childMale + Rel.0 + Rel.123 + Rel.4gr,
+      data = titanic.down)
+```
+
+```{r}
+predictions_down <- predictions_down %>% 
+  bind_cols(fit.dtree.f.d = predict(fit.dtree.f.d, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions_down$fit.dtree.f.d,
+                as.factor(titanic_test$Survived), mode = "everything")
+```
+
+As the sample size decreases more parsimonious models become more effective.
+
+## Ensemble Models
+
+
+```{r}
+ensemble_preds <- predictions_down %>% 
+  select(-fit.rf.f.d) %>% 
+  mutate(across(everything(), as.character)) %>% 
+  mutate(across(everything(), as.double)) %>% 
+  mutate(ensemble = rowSums(across(everything()))) %>% 
+  mutate(preds = if_else(ensemble > 3.5, 1, 0)) %>% 
+  select(preds) %>% 
+  mutate(preds = as_factor(preds)) %>% 
+  pull(preds)
+```
+
+```{r}
+confusionMatrix(ensemble_preds, titanic_test$Survived)
+```
+
+## All Models So Far
+
+```{r}
+ensemble_preds <- predictions %>% 
+  bind_cols(predictions_down) %>% 
+  select(-fit.logis.f.d) %>% 
+  mutate(across(everything(), as.character)) %>% 
+  mutate(across(everything(), as.double)) %>% 
+  mutate(ensemble = rowSums(across(everything()))) %>% 
+  mutate(preds = if_else(ensemble > 7.5, 1, 0)) %>% 
+  select(preds) %>% 
+  mutate(preds = as_factor(preds)) %>% 
+  pull(preds)
+```
+
+```{r}
+confusionMatrix(ensemble_preds, titanic_test$Survived)
+```
+
+
+# Model Fitting with Up Sampling
+
+
+
+## Creating an up sampled training set
+
+```{r}
+set.seed(31)
+titanic.up <- upSample(x = titanic[, names(titanic) != "Survived"], y = titanic$Survived,
+           list = FALSE, yname = "Survived") 
+```
+
+```{r}
+titanic.up %>% 
+  group_by(Survived) %>% 
+  count()
+```
+
+## Logistic Regression
+
+```{r}
+fit.logis.f.u <- logistic_reg(mode = "classification") %>% 
+  set_engine("glm") %>% 
+  fit(Survived ~ Sex.male + Rel.0 + Rel.123 + childMale + Female3,
+      data = titanic.up)
+```
+
+```{r}
+predictions_up <- tibble(fit.logis.f.u = predict(fit.logis.f.u, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions_up$fit.logis.f.u,
+                titanic_test$Survived, mode = "everything")
+```
+
+## XGBoost
+
+```{r}
+fit.xgb.f.u <- boost_tree(mode = "classification") %>% 
+  set_engine("xgboost") %>% 
+  fit(Survived ~ Sex.male  + Rel.0 + Rel.123  + childMale + oldFemale3  + Female3,
+      data = titanic.up)
+```
+
+```{r}
+predictions_up <- predictions_up %>% 
+  bind_cols(fit.xgb.f.u = predict(fit.xgb.f.u, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions_up$fit.xgb.f.u,
+                titanic_test$Survived, mode = "everything")
+```
+
+
+## Random Forest
+
+```{r}
+set.seed(15)
+fit.rf.f.u <- rand_forest(mode = "classification") %>% 
+  set_engine("randomForest") %>% 
+  fit(Survived ~ Sex.male + childMale + Female3 + Rel.0 + Rel.123 + Rel.4gr,
+      data = titanic.up)
+```
+
+```{r}
+predictions_up <- predictions_up %>% 
+  bind_cols(fit.rf.f.u = predict(fit.rf.f.u, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions_up$fit.rf.f.u,
+                titanic_test$Survived, mode = "everything")
+```
+
+## Neural Nets
+
+```{r}
+set.seed(19)
+fit.nn.f.u <- mlp(mode = "classification") %>% 
+  set_engine("nnet") %>% 
+  fit(Survived ~ Sex.male+ childMale + Female3 + Rel.0 + Rel.123 + Rel.4gr,
+      data = titanic.up)
+```
+
+```{r}
+predictions_up <- predictions_up %>% 
+  bind_cols(fit.nn.f.u = predict(fit.nn.f.u, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions_up$fit.nn.f.u,
+                titanic_test$Survived, mode = "everything")
+```
+
+
+## Support Vector Machines
+
+```{r}
+set.seed(19)
+fit.svm.f.u <- svm_rbf(mode = "classification") %>% 
+  set_engine("kernlab") %>% 
+  fit(Survived ~ Sex.male + Rel.0 + Rel.123 + childMale + Female3,
+      data = titanic.up)
+```
+
+```{r}
+predictions_up <- predictions_up %>% 
+  bind_cols(fit.svm.f.u = predict(fit.svm.f.u, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions_up$fit.svm.f.u,
+                titanic_test$Survived, mode = "everything")
+```
+
+
+
+## Nearest Neighbor
+
+```{r}
+set.seed(11)
+fit.knn.f.u <- nearest_neighbor(mode = "classification") %>% 
+  set_engine("kknn") %>% 
+  fit(Survived ~ Sex.male + childMale + Female3 + Fare + youngMale3 + Relatives , data = titanic.up)
+```
+
+```{r}
+predictions_up <- predictions_up %>% 
+  bind_cols(fit.knn.f.u = predict(fit.knn.f.u, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions_up$fit.knn.f.u,
+                titanic_test$Survived, mode = "everything")
+```
+
+Integer `Relatives` worked better here than categorized version `Rel`.
+
+## Naive Bayes
+
+```{r}
+fit.nb.f.u <- naive_Bayes(mode = "classification") %>% 
+  set_engine("klaR") %>% 
+  fit(Survived ~ Sex.male + childMale + Pclass.1 + Pclass.2 + Pclass.3 , data = titanic.up)
+```
+
+```{r}
+predictions_up <- predictions_up %>% 
+  bind_cols(fit.nb.f.u = predict(fit.nb.f.u, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions_up$fit.nb.f.u,
+                titanic_test$Survived, mode = "everything")
+```
+
+Every time I included `Pclass` Sensitivity sky-rocketed.
+
+
+## Decision Tree
+
+```{r}
+fit.dtree.f.u <- decision_tree(mode = "classification") %>% 
+  set_engine("C5.0") %>% 
+  fit(Survived ~ Sex.male + Pclass.1 + Pclass.2 + Pclass.3 + childMale + Rel.0 + Rel.123 + oldFemale3 , data = titanic.up)
+```
+
+```{r}
+predictions_up <- predictions_up %>% 
+  bind_cols(fit.dtree.f.u = predict(fit.dtree.f.u, new_data = titanic_test) %>% pull(.pred_class))
+```
+
+```{r}
+confusionMatrix(predictions_up$fit.dtree.f.u,
+                as.factor(titanic_test$Survived), mode = "everything")
+```
+
+## Ensemble Models
+
+
+```{r}
+ensemble_preds <- predictions_up %>% 
+  select(-fit.nn.f.u) %>% 
+  mutate(across(everything(), as.character)) %>% 
+  mutate(across(everything(), as.double)) %>% 
+  mutate(ensemble = rowSums(across(everything()))) %>% 
+  mutate(preds = if_else(ensemble > 3.5, 1, 0)) %>% 
+  select(preds) %>% 
+  mutate(preds = as_factor(preds)) %>% 
+  pull(preds)
+```
+
+```{r}
+confusionMatrix(ensemble_preds, titanic_test$Survived)
+```
+
+# Preparing the Kaggle Test Data
+
+Now I am going to re-apply all pre-processing actions to the actual train set.
+
+```{r}
+kagg_test <- read.csv("titanic_test.csv")
+```
+
+```{r}
+kagg_test <- kagg_test %>% 
+  select(-c(Name, Ticket, Cabin))
+```
+
+```{r}
+kagg_test <- kagg_test %>% 
+  mutate(Emb_m = fct_collapse(Embarked, SQ = c("S", "Q"), C = "C"))
+```
+
+
+```{r}
+kagg_test <- kagg_test %>% 
+  mutate(across(.cols = c(Sex, Embarked, Pclass), .fns = as_factor))
+```
+
+
+```{r}
+kagg_test <- kagg_test %>% 
+  mutate(is_age_na = as_factor(if_else(is.na(Age), 1, 0)))
+```
+
+```{r}
+kagg_test <- kagg_test %>% 
+  mutate(Relatives = SibSp + Parch)
+```
+
+```{r}
+kagg_test <- kagg_test %>% 
+  mutate(Rel = as.factor(case_when(
+    Relatives == 0 ~ "0",
+    Relatives > 0 & Relatives < 4 ~ "123",
+    Relatives > 3 ~ "4gr"
+  )))
+
+kagg_test <- kagg_test %>% 
+  select(-c(SibSp, Parch))
+```
+
+
+
+Imputation
+
+```{r}
+kagg_test <- kagg_test %>% 
+  mutate(Fare = if_else(is.na(Fare), median(Fare, na.rm = T), Fare))
+```
+
+Limiting `Fare`
+
+```{r}
+fare_quant <- kagg_test %>% 
+  group_by(Pclass) %>% 
+  summarise(
+    quan = quantile(Fare, probs = 0.9)
+  ) %>% pull(quan)
+
+kagg_test <- kagg_test %>% 
+  mutate(Fare2 = case_when(
+    Fare >= fare_quant[[1]] & Pclass == 1 ~ fare_quant[[1]],
+    Fare >= fare_quant[[2]] & Pclass == 2 ~ fare_quant[[2]], 
+    Fare >= fare_quant[[3]] & Pclass == 3 ~ fare_quant[[3]],
+    TRUE ~ Fare
+  ))
+```
+
+To one hot:
+
+```{r}
+dummy <- dummyVars(~., data = kagg_test)
+kagg_test <- as_tibble(predict(dummy, kagg_test))
+
+head(kagg_test)
+```
+
+```{r}
+set.seed(11)
+pre.process <- preProcess(kagg_test[, -c(1, 12:13, 16:20)], method = "bagImpute")
+
+kagg_test <- predict(pre.process, kagg_test)
+```
+
+Adding bias variables:
+
+```{r}
+kagg_test <- kagg_test %>% 
+  mutate(youngMale2 = ifelse(Age < 20 & Sex.male == 1 & Pclass.2 == 1, 1, 0),
+         youngMale3 = ifelse(Age < 20 & Sex.male == 1 & Pclass.3 == 1, 1, 0),
+         oldFemale3 = ifelse(Age > 30 & Sex.female == 1 & Pclass.3 == 1, 1, 0),
+         Female3 = ifelse(Sex.female == 1 & Pclass.3 == 1, 1, 0),
+         oldMale1 = ifelse(Age > 38 & Sex.male == 1 & Pclass.1 == 1, 1, 0),
+         childMale = ifelse(Age < 10 & Sex.male == 1, 1, 0),
+         Male3 = ifelse(Pclass.3 == 1 & Sex.male == 1, 1, 0),
+         Male1 = ifelse(Pclass.1 == 1 & Sex.male == 1, 1, 0))
+
+```
+
+```{r}
+normalize <- preProcess(kagg_test[, -1], method = "range")
+
+kagg_test <- predict(normalize, kagg_test)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
