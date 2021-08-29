@@ -983,6 +983,8 @@ titanic_test2 %>%
 
 I can't really catch anything to explain the survival of these people neither. I think this is the case of lack of data. Those people probably had some variable which helped them survive the accident. Maybe that was the position, proximity to escape route to the higher docks etc.
 
+Now False Negatives. This time prediction is survived but the ground truth is not survived.
+
 ```{r}
 titanic_test2 %>% 
   mutate(prediction = ensemble_preds) %>% 
@@ -990,6 +992,10 @@ titanic_test2 %>%
   group_by(Pclass, Sex) %>% 
   count()
 ```
+
+This time the model does the exact opposite. Females are mostly predicted for survival and for Pclass 1 and 2 this is a very solid prediction. However, this prediction fails for Pclass 3 females because they only had 50% survival rate. Again, I think we need more information about Class 3 in order to be able to predict better.
+
+Let's now apply Down Sampling and see how results would differ.
 
 # Model Fitting with Down Sampling
 
@@ -1009,6 +1015,8 @@ titanic.down %>%
   count()
 ```
 
+
+(*) indicates increased Specificity.
 
 ## Logistic Regression *
 
@@ -1090,7 +1098,7 @@ confusionMatrix(predictions_down$fit.nn.f.d,
 ```
 
 
-## Support Vector Machines
+## Radial Support Vector Machines *
 
 ```{r}
 set.seed(19)
@@ -1152,10 +1160,8 @@ confusionMatrix(predictions_down$fit.nb.f.d,
                 titanic_test$Survived, mode = "everything")
 ```
 
-This had the biggest response to the variables.
 
-
-## Decision Tree
+## Decision Tree *
 
 ```{r}
 fit.dtree.f.d <- decision_tree(mode = "classification") %>% 
@@ -1173,8 +1179,6 @@ predictions_down <- predictions_down %>%
 confusionMatrix(predictions_down$fit.dtree.f.d,
                 as.factor(titanic_test$Survived), mode = "everything")
 ```
-
-As the sample size decreases more parsimonious models become more effective.
 
 ## Ensemble Models
 
@@ -1195,7 +1199,7 @@ ensemble_preds <- predictions_down %>%
 confusionMatrix(ensemble_preds, titanic_test$Survived)
 ```
 
-## All Models So Far
+### All Models So Far
 
 ```{r}
 ensemble_preds <- predictions %>% 
@@ -1214,10 +1218,11 @@ ensemble_preds <- predictions %>%
 confusionMatrix(ensemble_preds, titanic_test$Survived)
 ```
 
+## Model Evaluation and Some Takeaways
+
+
 
 # Model Fitting with Up Sampling
-
-
 
 ## Creating an up sampled training set
 
