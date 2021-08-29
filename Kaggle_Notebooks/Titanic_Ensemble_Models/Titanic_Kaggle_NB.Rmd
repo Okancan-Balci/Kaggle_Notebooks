@@ -1015,7 +1015,6 @@ titanic.down %>%
   count()
 ```
 
-
 (*) indicates increased Specificity.
 
 ## Logistic Regression *
@@ -1182,7 +1181,6 @@ confusionMatrix(predictions_down$fit.dtree.f.d,
 
 ## Ensemble Models
 
-
 ```{r}
 ensemble_preds <- predictions_down %>% 
   select(-fit.rf.f.d) %>% 
@@ -1196,10 +1194,23 @@ ensemble_preds <- predictions_down %>%
 ```
 
 ```{r}
-confusionMatrix(ensemble_preds, titanic_test$Survived)
+confusionMatrix(ensemble_preds,
+                titanic_test$Survived, mode = "everything")
 ```
 
-### All Models So Far
+## Model Evaluation and Some Takeaways
+
+We improved the Specificity for almost all models. For the first ensemble it was 66% now it is 73%. This means that now the model can identify 11 more survivors. However, the Sensitivity took a big hit so does the Accuracy. A reason for that accuracy loss might be the decreased sample size because we down sampled and it cost us 207 observations. Considering the total sample, this is a serious information loss.
+
+This new result isn't necessarily bad. There may be circumstances where the benefit of predicting 11 more True Negatives outweighs the cost of losing 21 True Positives. In the case of accuracy though, I couldn't make down sampling work. 
+
+The other thing that I would like to talk is the performance of Nearest Neighbors algorithm. Strangely the model got better with down sampled data and its Specificity decreased! It's probably me being bad at ML but I wanted to report this. I want to note that parsimony usually worked better for kNN.
+
+Lastly, I feel like given a sufficient amount of data, down sampling would be a good approach to balance Sensitivity and Specificity and potentially getting better accuracy results.
+
+## All Models So Far
+
+For the sake of curiosity let's band all models together and check the results.
 
 ```{r}
 ensemble_preds <- predictions %>% 
@@ -1215,14 +1226,14 @@ ensemble_preds <- predictions %>%
 ```
 
 ```{r}
-confusionMatrix(ensemble_preds, titanic_test$Survived)
+confusionMatrix(ensemble_preds,
+                titanic_test$Survived, mode = "everything")
 ```
-
-## Model Evaluation and Some Takeaways
-
 
 
 # Model Fitting with Up Sampling
+
+
 
 ## Creating an up sampled training set
 
@@ -1317,7 +1328,7 @@ confusionMatrix(predictions_up$fit.nn.f.u,
 ```
 
 
-## Support Vector Machines
+## Radial Support Vector Machines
 
 ```{r}
 set.seed(19)
@@ -1415,7 +1426,26 @@ ensemble_preds <- predictions_up %>%
 ```
 
 ```{r}
-confusionMatrix(ensemble_preds, titanic_test$Survived)
+confusionMatrix(ensemble_preds,
+                titanic_test$Survived, mode = "everything")
+```
+
+```{r}
+ensemble_preds <- predictions %>% 
+  bind_cols(predictions_up) %>% 
+  select(-fit.nn.f.u) %>% 
+  mutate(across(everything(), as.character)) %>% 
+  mutate(across(everything(), as.double)) %>% 
+  mutate(ensemble = rowSums(across(everything()))) %>% 
+  mutate(preds = if_else(ensemble > 7.5, 1, 0)) %>% 
+  select(preds) %>% 
+  mutate(preds = as_factor(preds)) %>% 
+  pull(preds)
+```
+
+```{r}
+confusionMatrix(ensemble_preds,
+                titanic_test$Survived, mode = "everything")
 ```
 
 # Preparing the Kaggle Test Data
