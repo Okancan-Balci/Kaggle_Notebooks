@@ -149,7 +149,11 @@ titanic %>%
   geom_label(aes(label = round(..prop.., 2), group = is_age_na), stat = "count")+
   scale_fill_brewer(palette = "Accent")+
   theme(legend.position = c(0.9, 0.85),
-        legend.background = element_blank())
+        legend.background = element_blank(),
+        legend.title = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        axis.title = element_text(size = 14))
 ```
 
 It's the same consideration with the `Cabin` variable. I will be dropping this variable after the imputation.
