@@ -72,13 +72,13 @@ head(titanic)
 skim(titanic)
 ```
 
-* Imputation is needed for `Age` and `Embarked` variables since they have missing values. Most tree models don't need imputation but I am going to use other family of models such as Neural Nets or Support Vector Machines. 
+* Imputation is needed for `Age` and `Embarked` variables since they have missing values. Most tree models don't need imputation but I am going to use different families of models such as Neural Nets or Support Vector Machines. 
 
 ## Evaluation of Feature Quality and Missing Values
 
 * There might be ways to make `Ticket` variable useful. However, I am afraid it will take considerable amount of time to get information from that variable. For this reason I'll be removing that variable.
 
-* `Name` variable has titles in it. Those title would come handy. Further investigation is needed.
+* `Name` variable has titles in it. Those titles would come handy. Further investigation is needed.
 
 * `PassengerId` is useless and shall be removed.
 
@@ -94,11 +94,15 @@ titanic %>%
   geom_label(aes(label = round(..prop.., 2), group = is_Cabin_na), stat = "count")+
   scale_fill_brewer(palette = "Accent")+
   theme(legend.position = c(0.9, 0.85),
-        legend.background = element_blank())
+        legend.background = element_blank(),
+        legend.title = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        axis.title = element_text(size = 14))
 
 ```
 
-Observations which miss `Cabin` variable have lower survival rates. However, I can't make sure that this pattern will be repeated in the test set so I am dropping the variable completely. 
+Observations which miss `Cabin` variable have lower survival rates and this could be used in the prediction process. However, I can't make sure that this pattern will be repeated in the test set so I am dropping the variable completely. 
 
 * A closer look at `Embarked`
 
@@ -157,7 +161,7 @@ titanic <- titanic %>%
   select(-c(Ticket, Cabin, PassengerId))
 ```
 
-Other variables look very useful so let's investigate them deeply.
+Other variables look very useful so let's investigate them closely.
 
 ## Relationship Between Response Variable and Predictors
 
@@ -169,13 +173,16 @@ titanic %>%
   labs(title = "Survival status by Sex")+
   scale_fill_brewer(palette = "Accent")+
   theme(legend.position = c(0.9, 0.85),
-        legend.background = element_blank())
+        legend.background = element_blank(),
+        legend.title = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        axis.title = element_text(size = 14))
 ```
 
 * 81% of males died in the accident. 
 
 * 74% of females survived.
-
 
 ```{r}
 titanic %>% 
@@ -186,7 +193,11 @@ titanic %>%
   labs(title = "Survival status by Embarkment")+
   scale_fill_brewer(palette = "Accent")+
   theme(legend.position = c(0.9, 0.85),
-        legend.background = element_blank())
+        legend.background = element_blank(),
+        legend.title = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        axis.title = element_text(size = 14))
 ```
 
 * I want to analyze this variable because boarding may imply where passengers might be situated. In this case, category C has a higher survival rate. That is maybe because those passengers were mostly boarded far away from the crash location. S and Q look very similar and because of that they can be merged into a single category. This might help getting more accurate predictions.
@@ -200,7 +211,11 @@ titanic %>%
   labs(title = "Survival status by Class")+
   scale_fill_brewer(palette = "Accent")+
   theme(legend.position = c(0.9, 0.85),
-        legend.background = element_blank())
+        legend.background = element_blank(),
+        legend.title = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        axis.title = element_text(size = 14))
 ```
 
 * Class 3 has the highest death rate. 
@@ -218,7 +233,11 @@ titanic %>%
   labs(title = "Survival status by Class")+
   scale_fill_brewer(palette = "Accent")+
   theme(legend.position = c(0.1, 0.85),
-        legend.background = element_blank())
+        legend.background = element_blank(),
+        legend.title = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        axis.title = element_text(size = 14))
 ```
 
 * Pclass 2 and 3 nearly have the same death rate for male category. The difference comes from females of the Pclass 3. This is probably going to create bias for models because for Class 1 and 2 female category has very high survival rate whereas Class 3 doesn't.
@@ -226,20 +245,20 @@ titanic %>%
 ```{r}
 titanic %>% 
   ggplot(aes(Survived, Age))+
-  geom_violin(aes(fill = Survived), show.legend = FALSE)+
+  geom_violin(aes(fill = Survived), show.legend = FALSE, color = NA)+
   geom_boxplot(alpha = 0.4, size = 0.4, width = 0.4)+
   labs(title = "Survival status by Age")+
-  scale_fill_brewer(palette = "Accent")
+  scale_fill_brewer(palette = "Accent")+
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 14))
 ```
 
-* Age doesn't really help differentiate the survival status. There is one important thing to note though. Passengers who were below Age 10 had higher survival rates.  In the modelling this should be considered as well.
-
-However, this can change when another variables come into the picture.
+* Age doesn't really help differentiate the survival status. There is one important thing to note though. Passengers who were below Age 10 had higher survival rates. In the modelling this should be considered as well.
 
 ```{r}
 titanic %>% 
   ggplot(aes(Pclass, Age, fill = Survived))+
-  geom_violin(width = 0.7)+
+  geom_violin(width = 0.7, color = NA)+
   geom_boxplot(alpha = 0, width = 0.7, size = 0.3)+
   geom_label(aes(label = ..count.., group = Survived), y = -5, stat = "count", nudge_x = c(-0.2, 0.2))+
   facet_wrap(~Sex)+
@@ -247,25 +266,30 @@ titanic %>%
   labs(title = "Survival status by Class and Age")+
   scale_fill_brewer(palette = "Accent")+
   theme(legend.position = c(0.9, 0.85),
-        legend.background = element_blank())
+        legend.background = element_blank(),
+        legend.title = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        axis.title = element_text(size = 14))
 ```
 
 * This plot gives a clearer picture. For classes 1 and 2 survival rate is very high for males who were below age 18. Unfortunately this is not true for class 3 but it's still observable that child males had higher survival rates.
 
 * A similar pattern could be seen for female category but it is not as strong as male counterpart. Furthermore, we don't need to adjust for child females because models will likely predict them as survived. This is not the case for males.
 
-
 ```{r}
 titanic %>% 
   ggplot(aes(Survived, Fare))+
   geom_boxplot(aes(fill = Survived), show.legend = FALSE)+
   labs(title = "Survival status by Fare")+
-  scale_fill_brewer(palette = "Accent")
+  scale_fill_brewer(palette = "Accent")+
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 14))
 ```
 
 * Many observations could be considered as outliers. I am going to create a new fare variable where upper limit exists, probably 90% quantile. Maybe it helps with the models.
 
-* Survival Rate gets higher as fares increase. This might change if Pclass is taken into consideration again.
+* Survival Rate gets higher as fares increase. This might change if Pclass is taken into consideration.
 
 ```{r}
 titanic %>% 
@@ -274,10 +298,14 @@ titanic %>%
   labs(title = "Survival status by Fare and Class")+
   scale_fill_brewer(palette = "Accent")+
   theme(legend.position = c(0.9, 0.85),
-        legend.background = element_blank())
+        legend.background = element_blank(),
+        legend.title = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        axis.title = element_text(size = 14))
 ```
 
-* For Pclass 1 `Fare` correlates with survival. For Pclass 2 it still has some correlation but not as stonf as Pclass1. However, because of the presence of very high values it's not really healthy to comment on this plot. We'll come back to this variable.
+* For Pclass 1 `Fare` correlates with survival. For Pclass 2 it still has some correlation but not as strong as Pclass1. However, because of the presence of very high values it's not really healthy to comment on this plot. We'll come back to this variable.
 
 ```{r, results='hold'}
 titanic %>% 
@@ -287,7 +315,11 @@ titanic %>%
        x = "Sibling or Spouse")+
   scale_fill_brewer(palette = "Accent")+
   theme(legend.position = c(0.9, 0.85),
-        legend.background = element_blank())
+        legend.background = element_blank(),
+        legend.title = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        axis.title = element_text(size = 14))
 
 titanic %>% 
   ggplot(aes(as.factor(Parch), fill = Survived))+
@@ -296,7 +328,11 @@ titanic %>%
        x = "Parents or Children")+
   scale_fill_brewer(palette = "Accent")+
   theme(legend.position = c(0.9, 0.85),
-        legend.background = element_blank())
+        legend.background = element_blank(),
+        legend.title = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        axis.title = element_text(size = 14))
 ```
 
 * It could be a good idea to merge `SibSp`(Sibling/Spouse) and `Parch` (Parents/Children) since they both have the similar distributions.
@@ -329,7 +365,6 @@ I think there are two options :
 
 * I merge similar levels and factorize it. Here 0, 1-3 and +4 look different.
 
-
 ```{r}
 titanic %>% 
   mutate(Rel2 = as.factor(case_when(
@@ -343,7 +378,11 @@ titanic %>%
        x = "Relatives")+
   scale_fill_brewer(palette = "Accent")+
   theme(legend.position = c(0.9, 0.85),
-        legend.background = element_blank())
+        legend.background = element_blank(),
+        legend.title = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        axis.title = element_text(size = 14))
 ```
 
 I am going to keep both variables and try to find out which one is better iteratively. I'll also remove `SibSp` and `Parch` variables.
@@ -361,8 +400,11 @@ titanic %>%
   labs(title = "Survival by Female Titles and Class", y = NULL, x = NULL)+
   scale_fill_brewer(palette = "Accent")+
   theme(legend.position = c(0.9, 0.9),
-        legend.background = element_blank())
-
+        legend.background = element_blank(),
+        legend.title = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        axis.title = element_text(size = 14))
 ```
 
 I think for female titles there is nothing helping me explain the difference between survival status of classes. Model will highly likely predict most of the female category as survived, unfortunately "Mrs" and "Miss" aren't enough to overcome this bias.
@@ -378,7 +420,11 @@ I think for female titles there is nothing helping me explain the difference bet
   labs(title = "Survival by Male Titles and Class", y = NULL, x = NULL)+
   scale_fill_brewer(palette = "Accent")+
   theme(legend.position = c(0.9, 0.15),
-        legend.background = element_blank())  
+        legend.background = element_blank(),
+        legend.title = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        axis.title = element_text(size = 14))  
 ```
 
 This time I am looking for the exact opposite situation. Because of the class unbalance males highly likely to be predicted as dead. Again I am not seeing anything except for "Master" and after some research I learned that title master used for young boys at that time. So creating a variable which marks child males would be more effective. I am discarding the `Name` variable.
@@ -437,7 +483,11 @@ titanic %>%
   labs(title = "Fare Limited")+
   scale_fill_brewer(palette = "Accent")+
   theme(legend.position = c(0.9, 0.85),
-        legend.background = element_blank())
+        legend.background = element_blank(),
+        legend.title = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        legend.text = element_text(size = 12),
+        axis.title = element_text(size = 14))
 ```
 
 * Without very high values it's easier to see the relationship between Class, Fare and Survival. 
@@ -953,7 +1003,7 @@ This ensemble predicted one more positive case but it lost one negative case com
 
 ### Ensemble Evaluation
 
-Across all models we encountered high Sensitivity but relatively lower Specificity values. This means that those models could detect passengers who couldn't survive better than people who could. It was expected from the beginning because the prevalence of the positive class was 62%. You can see this in the output of the confusion matrix function as well. We can try to overcome this problem mainly with two alternative methods.
+Across all models we encountered had high Sensitivity but relatively lower Specificity values. This means that those models could detect passengers who couldn't survive better than people who could. It was expected from the beginning because the prevalence of the positive class was 62%. You can see this in the output of the confusion matrix function as well. We can try to overcome this problem mainly with two alternative methods.
 
 * Down Sampling - We can equalize the number of the survivors and the deceased by getting equal amount of observations from the prevalent class. In this case we are sacrificing observations.
 
@@ -1014,6 +1064,8 @@ titanic.down %>%
   group_by(Survived) %>% 
   count()
 ```
+
+As you can see two groups now have the same amount of observations.
 
 (*) indicates increased Specificity.
 
@@ -1138,8 +1190,6 @@ confusionMatrix(predictions_down$fit.knn.f.d,
                 titanic_test$Survived, mode = "everything")
 ```
 
-Spec decreased and Acc increased wut.
-
 ## Naive Bayes *
 
 ```{r}
@@ -1158,7 +1208,6 @@ predictions_down <- predictions_down %>%
 confusionMatrix(predictions_down$fit.nb.f.d,
                 titanic_test$Survived, mode = "everything")
 ```
-
 
 ## Decision Tree *
 
@@ -1233,7 +1282,9 @@ confusionMatrix(ensemble_preds,
 
 # Model Fitting with Up Sampling
 
+I was hoping to get better results with up sampling but I couldn't. It feels like increasing the number of observations with replacement is diluting the data and because of this models can't really calculate the nuances. And the other reason is that I got bored playing with formulas so maybe I didn't iterate enough.
 
+In this case Specificity increased for almost all models too but not as aggressively as it happened with Down Sampling.
 
 ## Creating an up sampled training set
 
@@ -1248,6 +1299,8 @@ titanic.up %>%
   group_by(Survived) %>% 
   count()
 ```
+
+Groups have equal amount of observations.
 
 ## Logistic Regression
 
@@ -1327,7 +1380,6 @@ confusionMatrix(predictions_up$fit.nn.f.u,
                 titanic_test$Survived, mode = "everything")
 ```
 
-
 ## Radial Support Vector Machines
 
 ```{r}
@@ -1347,8 +1399,6 @@ predictions_up <- predictions_up %>%
 confusionMatrix(predictions_up$fit.svm.f.u,
                 titanic_test$Survived, mode = "everything")
 ```
-
-
 
 ## Nearest Neighbor
 
@@ -1389,9 +1439,6 @@ confusionMatrix(predictions_up$fit.nb.f.u,
                 titanic_test$Survived, mode = "everything")
 ```
 
-Every time I included `Pclass` Sensitivity sky-rocketed.
-
-
 ## Decision Tree
 
 ```{r}
@@ -1412,7 +1459,6 @@ confusionMatrix(predictions_up$fit.dtree.f.u,
 
 ## Ensemble Models
 
-
 ```{r}
 ensemble_preds <- predictions_up %>% 
   select(-fit.nn.f.u) %>% 
@@ -1430,27 +1476,9 @@ confusionMatrix(ensemble_preds,
                 titanic_test$Survived, mode = "everything")
 ```
 
-```{r}
-ensemble_preds <- predictions %>% 
-  bind_cols(predictions_up) %>% 
-  select(-fit.nn.f.u) %>% 
-  mutate(across(everything(), as.character)) %>% 
-  mutate(across(everything(), as.double)) %>% 
-  mutate(ensemble = rowSums(across(everything()))) %>% 
-  mutate(preds = if_else(ensemble > 7.5, 1, 0)) %>% 
-  select(preds) %>% 
-  mutate(preds = as_factor(preds)) %>% 
-  pull(preds)
-```
-
-```{r}
-confusionMatrix(ensemble_preds,
-                titanic_test$Survived, mode = "everything")
-```
-
 # Preparing the Kaggle Test Data
 
-Now I am going to re-apply all pre-processing actions to the actual train set.
+Now I am going to re-apply all pre-processing actions to the actual test set.
 
 ```{r}
 kagg_test <- read.csv("titanic_test.csv")
@@ -1466,12 +1494,10 @@ kagg_test <- kagg_test %>%
   mutate(Emb_m = fct_collapse(Embarked, SQ = c("S", "Q"), C = "C"))
 ```
 
-
 ```{r}
 kagg_test <- kagg_test %>% 
   mutate(across(.cols = c(Sex, Embarked, Pclass), .fns = as_factor))
 ```
-
 
 ```{r}
 kagg_test <- kagg_test %>% 
@@ -1495,16 +1521,10 @@ kagg_test <- kagg_test %>%
   select(-c(SibSp, Parch))
 ```
 
-
-
-Imputation
-
 ```{r}
 kagg_test <- kagg_test %>% 
   mutate(Fare = if_else(is.na(Fare), median(Fare, na.rm = T), Fare))
 ```
-
-Limiting `Fare`
 
 ```{r}
 fare_quant <- kagg_test %>% 
@@ -1522,8 +1542,6 @@ kagg_test <- kagg_test %>%
   ))
 ```
 
-To one hot:
-
 ```{r}
 dummy <- dummyVars(~., data = kagg_test)
 kagg_test <- as_tibble(predict(dummy, kagg_test))
@@ -1537,8 +1555,6 @@ pre.process <- preProcess(kagg_test[, -c(1, 12:13, 16:20)], method = "bagImpute"
 
 kagg_test <- predict(pre.process, kagg_test)
 ```
-
-Adding bias variables:
 
 ```{r}
 kagg_test <- kagg_test %>% 
@@ -1559,16 +1575,58 @@ normalize <- preProcess(kagg_test[, -1], method = "range")
 kagg_test <- predict(normalize, kagg_test)
 ```
 
+# Getting Predictions 
 
+Random Forests and The Ensemble Models with the original train set had the best accuracy results so I am going to submit them both.
 
+## Random Forests
 
+```{r}
+kagg_test %>% 
+  select(PassengerId) %>% 
+  mutate(Survived = predict(fit.rf.f, new_data = kagg_test) %>% 
+           pull(.pred_class)) %>% 
+  write_csv("Predictions_RF.csv")
+```
 
+* Kaggle Score : 0.80143
 
+## Ensemble Models
 
+```{r}
+ensemble_preds <- tibble(
+  logis = predict(fit.logis.f, new_data = kagg_test) %>% pull(.pred_class),
+  xgb = predict(fit.xgb.f, new_data = kagg_test) %>% pull(.pred_class),
+  rf = predict(fit.rf.f, new_data = kagg_test) %>% pull(.pred_class),
+  nn = predict(fit.nn.f, new_data = kagg_test) %>% pull(.pred_class),
+  svm = predict(fit.svm.f, new_data = kagg_test) %>% pull(.pred_class),
+  knn = predict(fit.knn.f, new_data = kagg_test) %>% pull(.pred_class),
+  nb = predict(fit.nb.f, new_data = kagg_test) %>% pull(.pred_class)
+) %>% 
+  mutate(across(everything(), as.character),
+         across(everything(), as.numeric)) %>% 
+  mutate(ensemble = rowSums(across(everything()))) %>% 
+  mutate(preds = ifelse(ensemble > 3.5, 1, 0)) %>% 
+  pull(preds)
+  
+```
 
+```{r}
+kagg_test %>% 
+  select(PassengerId) %>% 
+  mutate(Survived = ensemble_preds)%>% 
+  write_csv("Predictions_Ensemble.csv")
+```
 
+* Kaggle Score : 0.79665
 
+With my test set both models had the same accuracy but Random Forests had better score on Kaggle.
 
+# Some Closing Remarks
+
+To be honest this project was a little bit longer than it should have been. However, playing around really helped me build a better intuition about these popular Machine Learning algorithms. 
+
+The results can be be improved with hyper-parameter optimization and cross-validation. Furthermore, there may be better feature engineering practices. 
 
 
 
