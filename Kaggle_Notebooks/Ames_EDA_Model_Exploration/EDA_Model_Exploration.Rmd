@@ -1,0 +1,1603 @@
+---
+title: "House Prices: EDA and Model Exploration with tidymodels"
+author: "Okancan Balcı"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    highlight: pygments
+    toc: true
+    toc_depth: 3
+    df_print: kable
+    code_folding: show
+---
+
+```{r, include=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(GGally)
+library(broom)
+library(patchwork)
+library(splines)
+library(rules)
+library(baguette)
+library(finetune)
+library(kernlab)
+library(ranger)
+library(ggrepel)
+library(ggridges)
+library(skimr)
+library(earth)
+library(doParallel)
+library(workflowsets)
+
+options(scipen = 25,
+        tidymodels.dark = TRUE)
+
+theme_set(theme_bw(base_size = 14))
+
+knitr::opts_chunk$set(warning = FALSE,
+                      message = FALSE,
+                      fig.align = "center",
+                      fig.width = 8)
+
+```
+
+# Introduction
+
+This notebook has two objectives:
+
+1. Exploratory Data Analysis
+
+2. Model Exploration
+
+EDA is an iterative and a dirty process. The first time I got my hands on this data set I went over every variable one by one. However, I am afraid going over 82 variables would clutter this notebook too much so instead I will only go over variables that I deemed useful in my dirty EDA.
+
+In the Model Exploration phase I am going to use different subsets of variables and I am also going to search optimal hyper-parameters in a very wide parameter space for many models. This means that this notebook will be quite computationally expensive (takes about 6 hours to run).
+
+My goal for this notebook is creating a nice foothold for myself so in the future I can come back and try to get better scores without getting frustrated by a disorganized work. Of course every reader is welcomed to continue this work.
+
+In some sense, this is only the first part of the House Prices Modelling. I certainly want to do the second part where I take a closer look to my models' failings and try to remedy them. In that case, I will need to re-explore the data thoroughly and carefully. This of course requires more experience and knowledge about feature selection and feature engineering as well as domain knowledge about house pricing.
+
+# Exploratory Data Analysis
+
+## Reading The Data
+
+```{r}
+train <- read_csv("train.csv")
+
+test <- read_csv("test.csv")
+```
+
+## A Brief Quality Check to Both Datasets
+
+### A Quick Duplicated Row Check 
+
+```{r}
+duplicated.data.frame(train) %>% sum()
+duplicated.data.frame(test) %>% sum()
+```
+
+There are no duplicated rows in both sets.
+
+### Missing Values 
+
+In this data set `NA` values don't necessarily mean the value is missing at random. For instance, `NA` value for `GarageYrBlt` means that particular house has no garage.
+
+For some variables the train set has no missing values but test set does. This should be approached carefully.
+
+#### Numeric Variables
+
+```{r}
+train %>% 
+  select(where(is.numeric)) %>% 
+  skim() %>% 
+  as_tibble() %>% 
+  select(2:3) %>% 
+  filter(skim_variable != "SalePrice") %>% 
+  bind_cols(
+    test %>% 
+      select(where(is.numeric)) %>% 
+      skim() %>% 
+      as_tibble() %>% 
+      select(n_missing_test = n_missing)
+  ) %>% 
+  filter(!(n_missing == 0 & n_missing_test == 0))
+```
+
+#### Character/Factor Variables
+
+```{r}
+train %>% 
+  select(where(is.character)) %>% 
+  skim() %>% 
+  as_tibble() %>% 
+  select(skim_variable, n_missing) %>% 
+  bind_cols(
+    test %>% 
+      select(where(is.character)) %>% 
+      skim() %>% 
+      as_tibble() %>% 
+      select(n_missing_test = n_missing)
+  ) %>% 
+  filter(!(n_missing == 0 & n_missing_test == 0))
+```
+
+### Unique Values of Character Variables
+
+Some categorical variables have different factor levels in train and test set. This might cause problems getting predictions if left unchecked.
+
+```{r}
+train %>% 
+  select(where(is.character)) %>% 
+  skim() %>% 
+  as_tibble() %>% 
+  select(skim_variable, n_unique = character.n_unique) %>% 
+  bind_cols(
+    test %>% 
+      select(where(is.character)) %>% 
+      skim() %>% 
+      as_tibble() %>% 
+      select(n_unique_test = character.n_unique)
+  ) %>% 
+  filter(n_unique != n_unique_test)
+```
+
+## A Brief Look at the Train Dataset
+
+This will be a little bit messy but it is always good practice to summarise the whole data set and check every other variable.
+
+### Numeric Variables
+
+```{r}
+train %>% 
+  select(where(is.numeric)) %>% 
+  skim()
+```
+
+### Factor Variables
+
+```{r}
+train %>% 
+  select(where(is.character)) %>% 
+  mutate(across(.cols = everything(), as.factor)) %>% 
+  skim()
+```
+
+## The Analysis of Candidate Variables
+
+### The Response Variable
+
+The response variable is skewed to right so it's best to take the natural logarithm of it. This way the response variable is distributed normally and this makes the models perform better.
+
+```{r,fig.height=7, fig.width=7}
+p <-  train %>% 
+  ggplot(aes(SalePrice))+
+  geom_histogram(fill = "steelblue", color = "white")+
+  labs(y = NULL)
+
+p2 <- train %>% 
+  ggplot(aes(log(SalePrice)))+
+  geom_histogram(fill = "steelblue", color = "white")+
+  labs(y = NULL)
+
+p / p2 
+```
+
+```{r}
+train <- train %>% 
+  mutate(SalePrice = log(SalePrice))
+```
+
+### Relationships between Sale Price and Categorical Variables
+
+Before I start let's create a function for plotting categorical variables against the response variable. This way there will be less copy and paste. This function will also calculate the Standard Error of the Mean of particular factor level so that I can build 95% confidence intervals. In this case confidence intervals are used as a guide rather than inference purposes.
+
+```{r}
+autoplot_category <- function(dataset, x, y) {
+  
+  summary_stats <- dataset %>% 
+    group_by({{y}}) %>% 
+    summarise(
+      mean = mean({{x}}, na.rm = TRUE),
+      sd = sd({{x}}, na.rm = TRUE),
+      n = n(),
+      sem = sd/sqrt(n),
+      uppr = mean + 1.96*sem,
+      lwr = mean - 1.96*sem
+    )
+  
+   
+  ggplot(data = dataset,aes(x = {{x}}, y ={{y}}, fill = {{y}}))+
+    geom_vline(xintercept = mean(dataset %>% pull({{x}}), na.rm = TRUE), size = 1.5, alpha = 0.2)+
+    geom_density_ridges(alpha = 0.2,color = "#0000001A")+
+    geom_boxplot(width = 0.5, fill = NA, outlier.colour = "darkred", position = position_nudge(y = 0.5),
+                 size = 0.5, outlier.size = 1)+
+    geom_errorbar(data = summary_stats, aes(x = mean, xmin = lwr, xmax = uppr ), width = 0.5, color = "darkred",
+                  position = position_nudge(y = 0.5), size = 0.7, alpha = 0.9)+
+    geom_point(data = summary_stats, aes(x = mean), color = "darkred", shape = 18, size = 2,
+               position = position_nudge(y = 0.5))+
+    geom_label(data = summary_stats, aes(x = 10.2,label = n), fill = NA, position = position_nudge(y = 0.5))+
+    ggtitle(paste(substitute(x) ,"versus", substitute(y)))+
+    labs(x = NULL, y = NULL)+
+    theme(legend.position = "none")
+}
+
+```
+
+#### Neighborhood
+
+```{r, fig.width=8, fig.height=10}
+train %>% 
+  mutate(Neighborhood = fct_reorder(Neighborhood, SalePrice, .fun = "mean")) %>% 
+  autoplot_category(SalePrice, Neighborhood)
+```
+
+Before I start the analysis let me explain the plot. I know it is very crowded but I think it helps seeing through the data clearly in many ways. Labels on the left show the number of the observations in a given strata. Density ridges and box plots are self explanatory. The red error bar is the 95% confidence interval for the mean of a given category and the red diamond in the middle is the mean. You can also see a thick vertical line that is the mean sale price of the whole train data.
+
+Overall, I think this variable correlates very strongly with Sale Price. However, there some problems with factor levels.
+
+1.  Some levels like `Blueste`, `NPkVill` and `Veenker` have small amount of observations. I think they should be merged with other levels. In this case parent levels should have similar distributions and similar mean/median values. Also I hope that the test set has similar strata. I don't want to check it because that would be data leakage. So I am hoping for the best.
+
+2.  Some factor levels are not normally distributed. For instance, `StoneBr` has a very uniform distribution. Some others like `MeadowV`, `CollgCr` and `Crawfor` have double peaks in their distributions. This might mean that within these neighborhoods there could be two types of houses so finding any ways to systematically separate them would increase the prediction power.
+
+3.  Some neighborhoods have very high standard deviation. For example, `OldTown` usually have cheaper houses but 5 observations could be considered as expensive. This might hurt the prediction quality.
+
+Since this is the initial EDA and Model Exploration phase I only want to merge two very small factor levels `Blueste` and `NPkVill` with `Sawyer` and `Mitchel`. I made this decision based on median values. For `Veenker` I could not find any suitable level to merge.
+
+```{r}
+train <- train %>% 
+  mutate(Neighborhood = as.factor(Neighborhood),
+         NeighborhoodMerged = fct_collapse(Neighborhood,
+                                           "BluesteSawyer" = c("Blueste", "Sawyer"),
+                                           "NPkVillMitchel" = c("NPkVill", "Mitchel")))
+test <- test %>% 
+  mutate(Neighborhood = as.factor(Neighborhood),
+         NeighborhoodMerged = fct_collapse(Neighborhood,
+                                           "BluesteSawyer" = c("Blueste", "Sawyer"),
+                                           "NPkVillMitchel" = c("NPkVill", "Mitchel")))
+```
+
+#### Lot Shape
+
+```{r}
+train %>% 
+  mutate(LotShape = fct_reorder(LotShape, SalePrice, .fun = "mean")) %>% 
+  autoplot_category(SalePrice, LotShape)
+```
+
+The general shape of the property can be thought as an ordered factor variable. It goes like this: Reg > IR1 > IR2 > IR3. Unfortunately, IR3 has very small amount of observations and this makes it trickier to understand the correlation. However, it doesn't mean that this variable can't help differentiate cheap houses from expensive ones. It's just not a strong explanatory variable in my opinion. I think I am going to merge IR2 and IR3 because except for the lower tail of IR3 they look kind of the same and it also makes sense considering this is an ordered variable.
+
+```{r}
+train <- train %>% 
+  mutate(LotShape = as.factor(LotShape),
+         LotShapeMerged = fct_collapse(LotShape,
+                                       "IR23" = c("IR2", "IR3")))
+
+test <- test %>% 
+  mutate(LotShape = as.factor(LotShape),
+         LotShapeMerged = fct_collapse(LotShape,
+                                       "IR23" = c("IR2", "IR3")))
+```
+
+#### Lot Config
+
+```{r}
+train %>% 
+  mutate(LotConfig = fct_reorder(LotConfig, SalePrice, .fun = "mean")) %>% 
+  autoplot_category(SalePrice, LotConfig)
+```
+
+`Inside`, `Corner`, `FR2` levels don't have information because they are nearly perfectly normally distributed around the mean sale price. However, `CulDSac` has many expensive houses in it so an indicator variable that shows if LotConfig is Cul-de-sac or not may be helpful. I am not really sure if I should merge `FR3` with `CulDSac` so I am going to keep it simple and create an indicator variable only for `CulDSac`.
+
+```{r}
+train <- train %>% 
+  mutate(LotConfig = as.factor(LotConfig),
+         LotConfig_isCulDSac = if_else(LotConfig == "CulDSac", 1, 0)) 
+
+test <- test %>% 
+  mutate(LotConfig = as.factor(LotConfig),
+         LotConfig_isCulDSac = if_else(LotConfig == "CulDSac", 1, 0)) 
+```
+
+#### Condition1
+
+```{r,fig.width=8, fig.height=7}
+train %>% 
+  mutate(Condition1 = fct_reorder(Condition1, SalePrice, .fun = "mean")) %>% 
+  autoplot_category(SalePrice, Condition1)
+```
+
+As a whole I don't think this variable is very useful but it has good information. We can observe that `Artery`, `Feedr` and `RRAe` levels have cheaper houses. And on the top, `PosA` and `PosN` have valuable houses. I am thinking of creating 3 different indicator variables for merged `PosA` and `PosN`, merged `Feedr` and `RRAe`, and `Artery`. The reason why I am not going to merge `Artery` is that it has 3 outliers on the expensive side. Let's check these 3 houses.
+
+```{r}
+train %>% 
+  filter(Condition1 == "Artery" & SalePrice > 12.3) %>% 
+  select(Id, LotArea, Neighborhood, OverallQual, GrLivArea)
+```
+
+These 3 houses are very big and they have very high quality ratings. It makes sense why they are expensive.
+
+```{r}
+train <- train %>% 
+  mutate(Condition1 = as.factor(Condition1),
+         Condition1_isPos_AN = if_else(Condition1 %in% c("PosA", "PosN"), 1, 0),
+         Condition1_isRRAe_Feedr = if_else(Condition1 %in% c("RRAe", "Feedr"), 1, 0),
+         Condition1_isArtery = if_else(Condition1 == "Artery", 1, 0))
+
+test <- test %>% 
+  mutate(Condition1 = as.factor(Condition1),
+         Condition1_isPos_AN = if_else(Condition1 %in% c("PosA", "PosN"), 1, 0),
+         Condition1_isRRAe_Feedr = if_else(Condition1 %in% c("RRAe", "Feedr"), 1, 0),
+         Condition1_isArtery = if_else(Condition1 == "Artery", 1, 0))
+```
+
+#### Building Type
+
+```{r}
+train %>% 
+  mutate(BldgType = fct_reorder(BldgType, SalePrice, .fun = "mean")) %>% 
+  autoplot_category(SalePrice, BldgType)
+```
+
+`Duplex`, `Twnhs` and `2fmCon` include cheaper houses so creating indicator variables out of them would be nice. However, `Twnhs` has two peaks in its distribution. This might mean that `Twnhs` has actually two distinct groups in it. One group(peak) is very normally priced and the other group is cheap. Because of this I am not going to create an indicator variable for `Twnhs`.
+
+```{r}
+train <- train %>% 
+  mutate(BldgType = as.factor(BldgType),
+         BldgType_isDuplex = if_else(BldgType == "Duplex", 1, 0),
+         BldgType_is2fmCon = if_else(BldgType == "2fmCon", 1, 0))
+
+test <- test %>% 
+  mutate(BldgType = as.factor(BldgType),
+         BldgType_isDuplex = if_else(BldgType == "Duplex", 1, 0),
+         BldgType_is2fmCon = if_else(BldgType == "2fmCon", 1, 0))
+```
+
+#### House Style**
+
+```{r,fig.width=8, fig.height=6}
+train %>% 
+  mutate(HouseStyle = fct_reorder(HouseStyle, SalePrice, .fun = "mean")) %>% 
+  autoplot_category(SalePrice, HouseStyle)
+```
+
+There are some distinctive qualities with this variable. There are many problems too. Common levels such as `2Story` or `1story` are too varied price wise. This would impair the predictive power. Additionally, in the test set `2.5Fin` level is non-existent so I must merge it in train set. I am also going to merge `2.5Unf` with `1.5Fin` not because it is logical but their distributions and median values look similar.
+
+```{r}
+test %>% distinct(HouseStyle)
+```
+
+```{r}
+train <- train %>% 
+  mutate(HouseStyle = as.factor(HouseStyle),
+         HouseStyleMerged = fct_collapse(HouseStyle,
+                                         "2Story" = c("2Story", "2.5Fin"),
+                                         "1.5Fin" = c("1.5Fin", "2.5Unf")))
+
+test <- test %>% 
+  mutate(HouseStyle = as.factor(HouseStyle),
+         HouseStyleMerged = fct_collapse(HouseStyle,
+                                         "1.5Fin" = c("1.5Fin", "2.5Unf")))
+```
+
+#### Overall Quality
+
+```{r,fig.width=8, fig.height=8}
+train %>% 
+  mutate(OverallQual = fct_reorder(as.factor(OverallQual), SalePrice, .fun = "mean")) %>% 
+  autoplot_category(SalePrice, OverallQual)
+```
+
+Overall Quality is such a strong predictor. Even the order of the labels are aligned perfectly. Unfortunately, this variable isn't flawless.
+
+1.  In the best quality tier(10) we observe two very cheap houses. This should be investigated.
+
+2.  Tier 3 and 4 have very long tails.
+
+3.  Tier 1 and 2 have very small amount of observations and need to be merged.
+
+First of all let's investigate those two low priced top quality houses:
+
+```{r}
+train %>% 
+  filter(OverallQual == 10 & SalePrice < 12.2)
+```
+
+I checked every other variable and tried to find out why these houses were very cheap relative to their strata. All other variables show that those houses are great. Maybe except for Neighborhood. Both are in `Edwards` and it is not the most expensive neighborhood.
+
+These houses will surely be over predicted but most importantly they may sway the predictions of all top quality houses. I have two possible remedies. I can change their prices to the mean price of their respective strata but this may probably tip the scales for the other variables. Other option is to remove them and I think it's for the best.
+
+Since I am removing these observations I expect more optimistic Cross Validation results for the train set. That's why I don't like removing observations but in this case I think it is very justifiable. Additionally, there might be similar observations in the test set and if this is the case RMSE will get hurt. However, I think that playing by the book and embracing fundamentals is the way to go.
+
+Before I remove these observations I also want to check lower tails of Quality 3 and 4.
+
+```{r}
+train %>% 
+  filter(OverallQual %in% c(3,4) & SalePrice < 11)
+```
+
+Those are very old houses and they haven't seen any make over so they are not modernized either. For now, I am not going to do anything except for merging levels 1, 2 and 3.
+
+```{r}
+Ids_to_remove <- train %>% 
+  filter(OverallQual == 10 & SalePrice < 12.2) %>% 
+  pull(Id)
+```
+
+```{r}
+train <- train %>% 
+  filter(!Id %in% Ids_to_remove)
+```
+
+```{r}
+train <- train %>% 
+  mutate(OverallQual = as.factor(OverallQual),
+         OverallQualMerged = fct_collapse(OverallQual,
+                                          "123" = c("1", "2", "3")))
+
+test <- test %>% 
+  mutate(OverallQual = as.factor(OverallQual),
+         OverallQualMerged = fct_collapse(OverallQual,
+                                          "123" = c("1", "2", "3")))
+```
+
+#### Overall Condition
+
+```{r,fig.width=8, fig.height=6}
+train %>% 
+  mutate(OverallCond = fct_reorder(as.factor(OverallCond), SalePrice, .fun = "mean")) %>% 
+  autoplot_category(SalePrice, OverallCond)
+```
+
+The Overall Condition variable doesn't look very healthy. For some reason the conditions of most of the houses were rated as 5. And it also surpasses condition 8,7,6. It's all over the place. However, we can observe that for lower conditions the variable makes sense. In this case I am going to create indicator variables for conditions 1,2 and 3 merged and also for condition 4.
+
+There is one problem. In condition rate 2 there is one expensive house so let's take a closer look.
+
+```{r}
+train %>% 
+  filter(OverallCond == 2 & SalePrice > 12)
+```
+
+I don't get why this house was rated 2. It is a big and a new house(Built in 2010). Maybe it was burned?? Since I am going to create separate indicator variables I am going to assign this house to condition rate 5.
+
+```{r}
+train <- train %>% 
+  mutate(OverallCond = if_else(Id == 379, 5, OverallCond))
+```
+
+```{r}
+train <- train %>% 
+  mutate(OverallCond = as.factor(OverallCond),
+         OverallCond_is123 = if_else(OverallCond %in% c("1", "2", "3"), 1, 0),
+         OverallCond_is4 = if_else(OverallCond == "4", 1, 0))
+
+test <- test %>% 
+  mutate(OverallCond = as.factor(OverallCond),
+         OverallCond_is123 = if_else(OverallCond %in% c("1", "2", "3"), 1, 0),
+         OverallCond_is4 = if_else(OverallCond == "4", 1, 0))
+```
+
+#### Remodel Date
+
+```{r,fig.width=8, fig.height=9}
+train %>% 
+  mutate(YearRemodAdd = cut_interval(YearRemodAdd, length = 5, dig.lab = 10),
+         YearRemodAdd = fct_reorder(YearRemodAdd, SalePrice, .fun = "mean")) %>% 
+  autoplot_category(SalePrice, YearRemodAdd)
+```
+
+This variable is actually continuous as you can see I binned it with 5 years of intervals. I can't say there is perfect correlation because years aren't ordered properly. Still, older remodel dates imply cheaper houses whereas recent remodel dates imply more expensive houses.
+
+I also tried `YearBuilt` variable and it was much more diluted. At least we can see clear cuts here.
+
+```{r}
+train <- train %>% 
+  mutate(YearRemodAddBinned = cut_interval(YearRemodAdd, length = 5, dig.lab = 10))
+
+test <- test %>% 
+  mutate(YearRemodAddBinned = cut_interval(YearRemodAdd, length = 5, dig.lab = 10))
+```
+
+#### Exterior Covering on House* **
+
+```{r,fig.width=8, fig.height=9}
+train %>% 
+  mutate(Exterior1st = fct_reorder(Exterior1st, SalePrice, .fun = "mean")) %>% 
+  autoplot_category(SalePrice, Exterior1st)
+```
+
+This variable has the potential of having a strong exploratory power. However, the spread of the levels are too wide. Again double peaks in distributions aren't really good too. In the test set there are 2 less factor levels so I must merge `Stone` and `ImStucc`(this might not be necessary because I am not going to use the whole variable) and also there are one missing value in the test set. Here `VinylSd` is the most prevalent category so I am going to assign that NA value to this category.
+
+`AsbShng` is Asbestos Shingles and no wonder these houses are cheap. I am going to create a dummy variable for this and I will also add other little cheap categories to this dummy variable.
+
+```{r}
+setdiff(train %>% distinct(Exterior1st) %>% pull(Exterior1st),
+        test %>% distinct(Exterior1st) %>% pull(Exterior1st))
+```
+
+```{r}
+train <- train %>% 
+  mutate(Exterior1st = as.factor(Exterior1st),
+         Exterior1st_isAsbShng = if_else(Exterior1st %in% c("CBlock", "AsbShng", "AsphShn", "BrkComm"), 1, 0))
+
+test <- test %>% 
+  mutate(Exterior1st = if_else(is.na(Exterior1st), "VinylSd", Exterior1st), 
+         Exterior1st = as.factor(Exterior1st),
+         Exterior1st_isAsbShng = if_else(Exterior1st %in% c("CBlock", "AsbShng", "AsphShn", "BrkComm"), 1, 0))
+```
+
+#### Masonry Veneer Type*
+
+```{r}
+train %>% 
+  mutate(MasVnrType = fct_reorder(MasVnrType, SalePrice, .fun = "mean")) %>% 
+  autoplot_category(SalePrice, MasVnrType)
+```
+
+I think this is a decent correlating variable. The only problem I am having is that `None` level has such a wide spread. I don't want to merge `BrkCmn` for now.
+
+NA value treatment is kind of tricky because I don't really have a clear idea where to assign them. In this case NA values look way above average price wise. However, I don't know if this pattern repeats in the test set. So should I just assign them to the biggest group(`None`) or a group that is kind of centered around the mean price(`BrkFace`)? Let's go for `BrkFace`.
+
+```{r}
+train <- train %>% 
+  mutate(MasVnrType = if_else(is.na(MasVnrType), "BrkFace", MasVnrType),
+         MasVnrType = as.factor(MasVnrType)) 
+
+test <- test %>% 
+  mutate(MasVnrType = if_else(is.na(MasVnrType), "BrkFace", MasVnrType),
+         MasVnrType = as.factor(MasVnrType)) 
+```
+
+#### Exterior Material Quality
+
+```{r}
+train %>% 
+  mutate(ExterQual = fct_reorder(ExterQual, SalePrice, .fun = "mean")) %>% 
+  autoplot_category(SalePrice, ExterQual)
+```
+
+Finally this variable needs no work. Again though, `TA` level has a dangerous long tail towards left.
+
+```{r}
+train <- train %>% 
+  mutate(ExterQual = as.factor(ExterQual))
+
+test <- test %>% 
+  mutate(ExterQual = as.factor(ExterQual))
+```
+
+#### Foundation
+
+```{r}
+train %>% 
+  mutate(Foundation = fct_reorder(Foundation, SalePrice, .fun = "mean")) %>% 
+  autoplot_category(SalePrice, Foundation)
+```
+
+It is not a surprise that foundation material is important in pricing.
+
+Where should I assign `Wood` and `Stone`? There two big categories, I am going to assign `Wood` to `PConc` and `Stone` to `CBlock`.
+
+```{r}
+train <- train %>% 
+  mutate(Foundation = as.factor(Foundation),
+         FoundationMerged = fct_collapse(Foundation,
+                                         "CBlockStone" = c("CBlock", "Stone"),
+                                         "PConcWood" = c("PConc", "Wood"))) 
+
+test <- test %>% 
+  mutate(Foundation = as.factor(Foundation),
+         FoundationMerged = fct_collapse(Foundation,
+                                         "CBlockStone" = c("CBlock", "Stone"),
+                                         "PConcWood" = c("PConc", "Wood"))) 
+```
+
+#### Height of the Basement*
+
+*NA = No Basement
+
+```{r}
+train %>% 
+  mutate(BsmtQual = fct_reorder(BsmtQual, SalePrice, .fun = "mean")) %>% 
+  autoplot_category(SalePrice, BsmtQual)
+```
+
+In this case NA is a place holder for "No Basement". As the height of the basement increases so does the price.
+
+```{r}
+train <- train %>% 
+  mutate(BsmtQual = if_else(is.na(BsmtQual), "NoBsmt", BsmtQual))
+
+test <- test %>% 
+  mutate(BsmtQual = if_else(is.na(BsmtQual), "NoBsmt", BsmtQual))
+```
+
+#### Heating Quality and Condition
+
+```{r}
+train %>% 
+  mutate(HeatingQC = fct_reorder(HeatingQC, SalePrice, .fun = "mean")) %>% 
+  autoplot_category(SalePrice, HeatingQC)
+```
+
+We can observe separation between levels. I just need to merge `Po` with `Fa`.
+
+```{r}
+train <- train %>% 
+  mutate(HeatingQC = as.factor(HeatingQC),
+         HeatingQCMerged = fct_collapse(HeatingQC,
+                                        "FaPo" = c("Fa", "Po")))
+
+test <- test %>% 
+  mutate(HeatingQC = as.factor(HeatingQC),
+         HeatingQCMerged = fct_collapse(HeatingQC,
+                                        "FaPo" = c("Fa", "Po")))
+```
+
+#### Heating Type**
+
+```{r}
+train %>% 
+  mutate(Heating = fct_reorder(Heating, SalePrice, .fun = "mean")) %>% 
+  autoplot_category(SalePrice, Heating)
+```
+
+It is clear that `Grav`, `Floor` and `Wall` are only present with cheaper houses(I didn't include `OthW` because it could be much more random.). I can create a dummy variable for these but the total observation amount is only 12! And the other problem is that there are only 4 levels present in the test set.
+
+```{r}
+test %>% distinct(Heating)
+```
+
+I am going to create that dummy variable anyways but I don't think it is going to be useful.
+
+```{r}
+train <- train %>% 
+  mutate(Heating_isGravWall = if_else(Heating %in% c("Grav", "Wall"), 1, 0))
+
+test <- test %>% 
+  mutate(Heating_isGravWall = if_else(Heating %in% c("Grav", "Wall"), 1, 0))
+```
+
+#### Central Air Conditioning
+
+```{r}
+train %>% 
+  mutate(CentralAir = fct_reorder(CentralAir, SalePrice, .fun = "mean")) %>% 
+  autoplot_category(SalePrice, CentralAir)
+```
+
+```{r}
+train <- train %>% 
+  mutate(CentralAir = as.factor(CentralAir))
+
+test <- test %>% 
+  mutate(CentralAir = as.factor(CentralAir))
+```
+
+#### Kitchen Quality*
+
+```{r}
+train %>% 
+  mutate(KitchenQual = fct_reorder(KitchenQual, SalePrice, .fun = "mean")) %>% 
+  autoplot_category(SalePrice, KitchenQual)
+```
+
+There is one NA value in the test set. In this case I should just assign that to the biggest group `TA`. Other than that this is a good variable.
+
+```{r}
+train <- train %>% 
+  mutate(KitchenQual = as.factor(KitchenQual))
+
+test <- test %>% 
+  mutate(KitchenQual = if_else(is.na(KitchenQual), "TA", KitchenQual),
+         KitchenQual = as.factor(KitchenQual)) 
+```
+
+#### Number of Fireplaces
+
+```{r}
+train %>% 
+  mutate(Fireplaces = fct_reorder(as.factor(Fireplaces), SalePrice, .fun = "mean")) %>% 
+  autoplot_category(SalePrice, Fireplaces)
+```
+
+This is related to the size of the house in my opinion. It is debatable that there is a difference between 1 fireplace and 2 fireplaces. In this case they have different median values and %95 confidence interval for their mean look sort of different. I am only going to merge 2 and 3 levels and move on. 
+
+The test set has one 4 fireplaces level so I am going to merge it as well.
+
+```{r}
+train <- train %>% 
+  mutate(Fireplaces = as.factor(Fireplaces),
+         FireplacesMerged = fct_collapse(Fireplaces,
+                                         "234" = c("2", "3"))) 
+test <- test %>% 
+  mutate(Fireplaces = as.factor(Fireplaces),
+         FireplacesMerged = fct_collapse(Fireplaces,
+                                         "234" = c("2", "3", "4"))) 
+```
+
+#### Interior Finish of the Garage
+
+NA = No Garage
+
+```{r}
+train %>% 
+  mutate(GarageFinish = fct_reorder(GarageFinish, SalePrice, .fun = "mean")) %>% 
+  autoplot_category(SalePrice, GarageFinish)
+```
+
+Except for very long tails I think this variable has the potential of having good explanatory power. It makes sense that a finished product is much more valuable than an unfinished one.
+
+```{r}
+train <- train %>% 
+  mutate(GarageFinish = if_else(is.na(GarageFinish), "NoGarage", GarageFinish),
+         GarageFinish = as.factor(GarageFinish)) 
+
+test <- test %>% 
+  mutate(GarageFinish = if_else(is.na(GarageFinish), "NoGarage", GarageFinish),
+         GarageFinish = as.factor(GarageFinish))
+```
+
+### Relationships between Sale Price and Numerical Variables
+
+#### Total Basement Area*
+
+```{r}
+p1 <- train %>% 
+  ggplot(aes(TotalBsmtSF))+
+  geom_histogram(fill = "steelblue", color = "white")+
+  labs(y = NULL)
+p2 <- train %>% 
+  ggplot(aes(log(TotalBsmtSF+1)))+
+  geom_histogram(fill = "steelblue", color = "white")+
+  labs(y = NULL)
+
+p1 / p2
+```
+
+Taking the log of basement area is helpful but we still have 0 values to deal with. I am going to sum Basement Area with Area Above Ground. This way hopefully I'll get rid of zeros. Below you can see that there is somewhat nice correlation between Basement Area and Sale Price.
+
+```{r}
+train %>% 
+  ggplot(aes(TotalBsmtSF, SalePrice))+
+  geom_point(alpha = 0.8)+
+  geom_smooth()+
+  scale_x_continuous(n.breaks = 6)
+```
+
+There is only one missing value in the test set. I am filling it with the median value.
+
+```{r}
+test <- test %>% 
+  mutate(TotalBsmtSF = replace_na(TotalBsmtSF, median(TotalBsmtSF, na.rm = TRUE)))
+```
+
+
+#### Above Ground Living Area
+
+```{r}
+p1 <- train %>% 
+  ggplot(aes(GrLivArea))+
+  geom_histogram(fill = "steelblue", color = "white")+
+  labs(y = NULL)
+
+p2 <- train %>% 
+  ggplot(aes(log(GrLivArea)))+
+  geom_histogram(fill = "steelblue", color = "white")+
+  labs(y = NULL)
+
+p1 / p2
+```
+
+Logged living area looks better distribution wise. Below we can see that there is a stronger correlation than Basement Area. 
+
+```{r}
+train %>% 
+  ggplot(aes(log(GrLivArea), SalePrice))+
+  geom_point(alpha = 0.8)+
+  geom_smooth()
+```
+
+Let's also sum them.
+
+#### Total Area
+
+```{r}
+p1 <- train %>% 
+  mutate(TotalArea = GrLivArea + TotalBsmtSF) %>% 
+  ggplot(aes(TotalArea))+
+  geom_histogram(fill = "steelblue", color = "white")+
+  labs(y = NULL)
+
+p2 <- train %>% 
+  mutate(TotalArea = GrLivArea + TotalBsmtSF) %>% 
+  ggplot(aes(log(TotalArea)))+
+  geom_histogram(fill = "steelblue", color = "white")+
+  labs(y = NULL)
+
+p1 / p2
+```
+
+I don't think taking the logarithm of the Total Area would make much difference. Still, I think it is best to continue with logged Total Area.
+
+```{r}
+train %>% 
+  mutate(TotalArea = GrLivArea + TotalBsmtSF) %>%
+  ggplot(aes(log(TotalArea), SalePrice))+
+  geom_point()+
+  geom_smooth()
+```
+
+I think Sale Price has even stronger correlation with Total Area than it had with Total Basement Area or Above Ground Living Area. I'll check that in the correlation matrix later.
+
+```{r}
+train <- train %>% 
+  mutate(TotalArea = GrLivArea + TotalBsmtSF)
+
+test <- test %>% 
+  mutate(TotalArea = GrLivArea + TotalBsmtSF)
+```
+
+
+#### Building Age at the Time It was Sold
+
+I wasn't sure about Year Built variable so I decided to derive the building age. 
+
+```{r}
+p1 <- train %>%
+  mutate(BuildingAge = YrSold - YearBuilt) %>% 
+  ggplot(aes(BuildingAge))+
+  geom_histogram(color = "white", fill = "steelblue")+
+  scale_x_continuous(n.breaks = 15)
+
+p2 <- train %>%
+  mutate(BuildingAge = YrSold - YearBuilt) %>% 
+  ggplot(aes(log(BuildingAge+1)))+
+  geom_histogram(color = "white", fill = "steelblue")+
+  scale_x_continuous(n.breaks = 15)
+
+p1 / p2
+```
+
+The distribution is terrible. Also as you can see from the scatter plot below very old houses doesn't really affect the Sale Price well. In fact the responsiveness of Sale Price to Building Age gets weaker as we go along the plot. These un-even correlations can create problems.
+
+I am not going to bin this variable just yet. Also I am going to create an indicator variable for houses which are older than 90 years.
+
+```{r}
+train %>%
+  mutate(BuildingAge = YrSold - YearBuilt) %>% 
+  ggplot(aes(BuildingAge, SalePrice))+
+  geom_point(alpha = 0.8, show.legend = FALSE)+
+  geom_smooth(aes(color = as.factor(BuildingAge > 90), fill = as.factor(BuildingAge > 90)), show.legend = FALSE)+
+  scale_x_continuous(n.breaks = 10)+
+  scale_color_brewer(palette = "Set1")
+```
+
+```{r}
+train <- train %>% 
+  mutate(BuildingAge = YrSold - YearBuilt,
+         BuildingAge_isOver90 = as.double(BuildingAge > 90)) 
+
+test <- test %>% 
+  mutate(BuildingAge = YrSold - YearBuilt,
+         BuildingAge_isOver90 = as.double(BuildingAge > 90)) 
+```
+
+
+### Correlations between All Numeric Variables
+
+```{r}
+train %>% 
+  select(SalePrice, TotalBsmtSF , GrLivArea,  TotalArea, BuildingAge) %>% 
+  ggcorr(label = TRUE, label_round = 2, geom = "circle", min_size = 10, max_size = 20)+
+  theme(legend.key.height = unit(0.85, "inch"))
+```
+
+I included `TotalBsmtSF` and `GrLivArea` in the correlation matrix as well. As I felt above `TotalArea` indeed correlates stronger with 82%! Additionally summing those two variables might help with multi-colinearity problem since `TotalBsmtSF` and `GrLivArea` don't have a weak correlation between them.
+
+`BuildingAge` negatively correlates with `SalePrice` just as expected. This is the good news. On the bad side, `TotalArea` and `BuildingAge` have a little correlation going between them. It is certainly in the grey area because -34% isn't that strong but I am definitely noting this.
+
+# Model Exploration
+
+## Candidate Recipes
+
+`tidymodels` makes it very easy to work with different formulations. In this case, I am going to try two different formulations. In the first one I am going to throw every variable I had in EDA. In the second one, I'll only use the variables that I think are very useful.
+
+In every step, I'll convert factor variables to dummy variables, take the natural logarithm of `TotalArea` and normalize all numeric variables.
+
+### All Variables
+
+```{r}
+recipe_all <- train %>% 
+  recipe(SalePrice ~ TotalArea + BuildingAge + NeighborhoodMerged + LotShapeMerged + LotConfig_isCulDSac +
+           Condition1_isArtery + Condition1_isPos_AN + Condition1_isRRAe_Feedr +
+           BldgType_is2fmCon + BldgType_isDuplex +
+           HouseStyleMerged + OverallQualMerged + OverallCond_is123 + OverallCond_is4 +
+           YearRemodAddBinned + Exterior1st_isAsbShng + MasVnrType + ExterQual +
+           FoundationMerged + BsmtQual + HeatingQCMerged + CentralAir + KitchenQual +
+           FireplacesMerged + GarageFinish + BuildingAge_isOver90,
+         data = .) %>% 
+  step_log(TotalArea) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  step_dummy(all_nominal_predictors())
+```
+
+### A Parsimonious Model
+
+```{r}
+recipe_pars <- train %>% 
+  recipe(SalePrice ~ TotalArea + BuildingAge + BuildingAge_isOver90 + NeighborhoodMerged +
+           ExterQual + KitchenQual + FoundationMerged + CentralAir + BsmtQual +
+           GarageFinish + OverallQualMerged + FireplacesMerged + OverallCond_is123 + OverallCond_is4 + 
+           HouseStyleMerged + MasVnrType + HeatingQCMerged + YearRemodAddBinned,
+         data = .) %>% 
+  step_log(TotalArea) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  step_dummy(all_nominal_predictors())
+```
+
+
+## Candidate Models
+
+Here I am going to try out 7 different models. In this case, I approached the hyper-parameters in more manual way because I want to learn more about them. Most of the time, in the tuning process `tidymodels` gets you covered up but still you have to set hyper-parameters like `mtry` for Random Forests for Gradient Boosting Trees. 
+
+### XGBoost
+
+```{r}
+xgb <- boost_tree(mtry = tune(), trees = tune(), learn_rate = tune(),
+                  tree_depth = tune(), min_n = tune()) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("regression")
+```
+
+```{r}
+xgb_param <- parameters(xgb) %>% 
+  update(trees = trees(c(1000,3000)),
+         mtry = mtry(c(4,18)),
+         learn_rate = learn_rate(c(-5,-1)),
+         tree_depth = tree_depth(c(1, 10)),
+         min_n = min_n(c(2, 30))
+         )
+
+```
+
+### Neural Nets
+
+```{r}
+nn <- mlp(hidden_units = tune(), penalty = tune(), epochs = tune()) %>% 
+  set_engine("nnet") %>% 
+  set_mode("regression")
+```
+
+```{r}
+nn_param <- parameters(nn) %>% 
+  update(
+    hidden_units = hidden_units(c(1,5)),
+    penalty = penalty(c(-5,0)),
+    epochs = epochs(c(10, 1000))
+  )
+
+```
+
+### Random Forests
+
+```{r}
+rf <- rand_forest(mtry = tune(), trees = tune(), min_n = tune()) %>% 
+  set_engine("ranger") %>% 
+  set_mode("regression")
+```
+
+```{r}
+rf_param <- parameters(rf) %>% 
+  update(mtry = mtry(c(10,20)),
+         trees = trees(c(1000, 2500)),
+         min_n = min_n(c(2, 20)))
+```
+
+### Radial SVM
+
+```{r}
+rad_svm <- svm_rbf(cost = tune(), rbf_sigma = tune(), margin = tune()) %>% 
+  set_engine("kernlab") %>% 
+  set_mode("regression")
+```
+
+```{r}
+rad_svm_param <- parameters(rad_svm) %>% 
+  update(
+    cost = cost(c(-10, 5)),
+    rbf_sigma = rbf_sigma(c(-5,0)),
+    margin = svm_margin(c(0, 0.2))
+  )
+```
+
+### Cubist Rules
+
+```{r}
+cub_rules <- cubist_rules(committees = tune(), neighbors = tune(), max_rules = tune()) %>% 
+  set_engine("Cubist") %>% 
+  set_mode("regression")
+```
+
+```{r}
+cub_rules_param <- parameters(cub_rules) %>% 
+  update(
+    committees = committees(c(1, 100)),
+    neighbors = neighbors(c(1, 10)),
+    max_rules = max_rules(c(1, 500))
+  )
+```
+
+### Linear Regression with Regularization
+
+```{r}
+lin_reg <- linear_reg(penalty = tune(), mixture = tune()) %>% 
+  set_engine("glmnet") %>% 
+  set_mode("regression")
+```
+
+```{r}
+lin_reg_param <- parameters(lin_reg) %>% 
+  update(
+    penalty = penalty(c(-5, 0)),
+    mixture = mixture(c(0,1))
+  )
+```
+
+### MARS
+
+```{r}
+mars_fit <- mars(num_terms = tune(), prod_degree = tune()) %>% 
+  set_engine("earth") %>% 
+  set_mode("regression")
+```
+
+```{r}
+mars_fit_param <- parameters(mars_fit) %>% 
+  update(
+    num_terms = num_terms(c(5, 15)),
+    prod_degree = prod_degree(c(1, 2))
+  )
+```
+
+
+## Model Fitting
+
+### Creating Workflowsets
+
+Now I bring every model and recipe(formula) together and melt them in a workflowset. 
+
+```{r}
+exploratory_workflowset <- workflow_set(
+  
+  preproc = list("recipe_all" = recipe_all, "recipe_pars" = recipe_pars),
+  
+  models = list("neural_net" = nn, "xgboost" = xgb,"rand_for" = rf, "rad_svm" = rad_svm,
+                "cubist_rules" = cub_rules, "linear_reg" = lin_reg, "MARS" = mars_fit)
+)
+```
+
+#### Adding Parameter Information
+
+In this section I am adding the hyper-parameter information to the workflowset. You can add different parameters for different recipes. Again as I said this is the more manual way so excuse my copy-paste skills here.
+
+```{r}
+exploratory_workflowset <- exploratory_workflowset %>% 
+  option_add(param_info = xgb_param, id = "recipe_all_xgboost") %>% 
+  option_add(param_info = nn_param, id = "recipe_all_neural_net") %>% 
+  option_add(param_info = rf_param, id = "recipe_all_rand_for") %>% 
+  option_add(param_info = rad_svm_param, id = "recipe_all_rad_svm") %>% 
+  option_add(param_info = cub_rules_param, id = "recipe_all_cubist_rules") %>% 
+  option_add(param_info = lin_reg_param, id = "recipe_all_linear_reg") %>% 
+  option_add(param_info = mars_fit_param, id = "recipe_all_MARS") %>% 
+  option_add(param_info = xgb_param, id = "recipe_pars_xgboost") %>% 
+  option_add(param_info = nn_param, id = "recipe_pars_neural_net") %>% 
+  option_add(param_info = rf_param, id = "recipe_pars_rand_for") %>% 
+  option_add(param_info = rad_svm_param, id = "recipe_pars_rad_svm") %>% 
+  option_add(param_info = cub_rules_param, id = "recipe_pars_cubist_rules") %>% 
+  option_add(param_info = lin_reg_param, id = "recipe_pars_linear_reg") %>% 
+  option_add(param_info = mars_fit_param, id = "recipe_pars_MARS")  
+```
+
+### Fitting with Cross Validation
+
+I am going to use 5-Fold Cross-Validation and repeat this 5 times. I am also setting the seed to make this notebook more reproducible. 
+
+```{r}
+set.seed(1993)
+cv_folds <- vfold_cv(train, v = 5, repeats = 5)
+
+grid_control <- control_grid(
+  verbose = TRUE
+)
+```
+
+#### Parallel Processing
+
+`doParallel` package makes parallelization very easy. In this case I am going to use 3 cores. In theory this should decrease the computing time by %66. However, I can say from my experiments that in reality it is more like %50-52(for this notebook of course.) .
+
+```{r}
+cl <- makeCluster(3)
+registerDoParallel(cl)
+```  
+
+Lastly, in this chunk, I bring everything together. The most important thing here is the `grid` argument. Above, I set the hyper-parameter spaces. In this case `workflow_map()` function will fit 60 different models within these hyper-parameter spaces. 
+
+```{r}
+exploratory_results <- exploratory_workflowset %>% 
+  workflow_map(
+    verbose = TRUE,
+    seed = 1993,
+    resamples = cv_folds,
+    control = grid_control,
+    grid = 60,
+    metrics = metric_set(rmse)
+  )
+```
+
+## Model Evaluation and Finalization
+
+This section will be quite brief. First, We will see and compare the best results then for each model I'll be plotting hyper-parameters and their marginal effects on RMSE. Lastly, I am going to re-fit the models to whole training set by using the best hyper-parameters and submit the results.
+
+```{r, fig.width=8.5}
+autoplot(exploratory_results,
+         select_best = TRUE)+
+  geom_text(aes(label = wflow_id), angle = 90, nudge_x = -0.4)+
+  scale_y_continuous(n.breaks = 10)+
+  labs(y = NULL)+
+  theme(legend.position = "none")
+```
+
+Here except for Random Forests and MARS, models are performing quite well. Parsimonious models are always marginally worse but it doesn't mean that their test score will be bad too. Since nearly all models are comparable, I will need to decide which ones to work with after I get the test results. However, MARS and RF are out :(. 
+
+The reason why I want to analyze the hyper-parameter results is that I want to narrow down the parameter space so next time I try to get better results by doing some feature engineering re-fitting will be less time consuming computationally. 
+
+Below, there is a very lazy function that will help me compare hyper-parameters. I am going to plot both recipes but they have similar results. I hope this won't clutter the notebook too much.
+
+```{r}
+plot_compare <- function(id_all, id_pars) {
+
+p1 <- exploratory_results %>% 
+  pull_workflow_set_result(id = id_all) %>%
+  autoplot()+
+  ggtitle("Recipe All")
+
+p2 <- exploratory_results %>% 
+  pull_workflow_set_result(id = id_pars) %>%
+  autoplot()+
+  ggtitle("Recipe Parsimonious")
+
+return(p1 / p2) 
+}
+
+## pull_workflow_set_result() is deprecated but the new function
+## extract_workflow_set_result() doesn't work in Kaggle for this moment.
+```
+
+
+### XGBoost
+
+Here the only hyper-parameter that matters is the Learning Rate.
+
+```{r, fig.height=8, fig.width=8.5}
+plot_compare("recipe_all_xgboost",
+             "recipe_pars_xgboost")
+```
+
+You can also check the Top 10 models for both All and Parsimonious recipes respectively:
+
+```{r}
+exploratory_results %>% 
+  pull_workflow_set_result(id = "recipe_all_xgboost") %>% 
+  collect_metrics() %>% 
+  arrange(mean) %>% 
+  slice_head(n = 10)
+
+exploratory_results %>% 
+  pull_workflow_set_result(id = "recipe_pars_xgboost") %>% 
+  collect_metrics() %>% 
+  arrange(mean) %>% 
+  slice_head(n = 10)
+```
+
+#### Final Fit
+
+For the last model I am choosing the best of the results and I will manually enter the hyper-parameters for reproducibility sake.
+
+```{r}
+set.seed(1993)
+best_model <- boost_tree(mtry = 9, trees = 2472, learn_rate = 0.05308297,
+                  tree_depth = 2, min_n = 2) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("regression")
+
+workflow() %>% 
+  add_recipe(recipe_all) %>% 
+  add_model(best_model) %>% 
+  fit(train) %>% 
+  predict(new_data = test) %>% 
+  bind_cols(Id = test$Id) %>% 
+  mutate(SalePrice = exp(.pred)) %>% 
+  select(-.pred) %>% 
+  write_csv("XGB_All_NULL.csv")
+```
+
+```{r}
+set.seed(1993)
+best_model <- boost_tree(mtry = 11, trees = 1375, learn_rate = 0.01700219,
+                  tree_depth = 5, min_n = 4) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("regression")
+
+workflow() %>% 
+  add_recipe(recipe_pars) %>% 
+  add_model(best_model) %>% 
+  fit(train) %>% 
+  predict(new_data = test) %>% 
+  bind_cols(Id = test$Id) %>% 
+  mutate(SalePrice = exp(.pred)) %>% 
+  select(-.pred) %>% 
+  write_csv("XGB_Pars_NULL.csv")
+```
+
+### Neural Nets
+
+Single hidden unit seems to be working well. Regularization amount is the most important factor here.
+
+```{r, fig.height=7, fig.width=8}
+plot_compare("recipe_all_neural_net",
+             "recipe_pars_neural_net")
+```
+
+
+```{r}
+exploratory_results %>% 
+  pull_workflow_set_result(id = "recipe_all_neural_net") %>% 
+  collect_metrics() %>% 
+  arrange(mean) %>% 
+  slice_head(n = 10)
+
+exploratory_results %>% 
+  pull_workflow_set_result(id = "recipe_pars_neural_net") %>% 
+  collect_metrics() %>% 
+  arrange(mean) %>% 
+  slice_head(n = 10)
+```
+
+#### Final Fit
+
+```{r}
+set.seed(1993)
+best_model <- mlp(hidden_units = 1, penalty = 0.0008246147, epochs = 692) %>% 
+  set_engine("nnet") %>% 
+  set_mode("regression")
+
+workflow() %>% 
+  add_recipe(recipe_all) %>% 
+  add_model(best_model) %>% 
+  fit(train) %>% 
+  predict(new_data = test) %>% 
+  bind_cols(Id = test$Id) %>% 
+  mutate(SalePrice = exp(.pred)) %>% 
+  select(-.pred) %>% 
+  write_csv("NN_All_NULL.csv")
+```
+
+```{r}
+set.seed(1993)
+best_model <- mlp(hidden_units = 1, penalty = 0.006460661, epochs = 470) %>% 
+  set_engine("nnet") %>% 
+  set_mode("regression")
+
+workflow() %>% 
+  add_recipe(recipe_pars) %>% 
+  add_model(best_model) %>% 
+  fit(train) %>% 
+  predict(new_data = test) %>% 
+  bind_cols(Id = test$Id) %>% 
+  mutate(SalePrice = exp(.pred)) %>% 
+  select(-.pred) %>% 
+  write_csv("NN_Pars_NULL.csv")
+```
+
+### Random Forests
+
+Smaller Node Sizes and Bigger Randomly Selected Predictor amount are better.
+
+```{r, fig.height=8, fig.width=8}
+plot_compare("recipe_all_rand_for",
+             "recipe_pars_rand_for")
+```
+
+
+```{r}
+exploratory_results %>% 
+  pull_workflow_set_result(id = "recipe_all_rand_for") %>% 
+  collect_metrics() %>% 
+  arrange(mean) %>% 
+  slice_head(n = 10)
+
+exploratory_results %>% 
+  pull_workflow_set_result(id = "recipe_pars_rand_for") %>% 
+  collect_metrics() %>% 
+  arrange(mean) %>% 
+  slice_head(n = 10)
+```
+
+### Radial SVM
+
+The results seem to be insensitive to Insensitivity Margin ;).
+
+```{r, fig.height=7, fig.width=8}
+plot_compare("recipe_all_rad_svm",
+             "recipe_pars_rad_svm")
+```
+
+You can actually observe that hyper-paremeters are same for all recipes here.
+
+```{r}
+exploratory_results %>% 
+  pull_workflow_set_result(id = "recipe_all_rad_svm") %>% 
+  collect_metrics() %>% 
+  arrange(mean) %>% 
+  slice_head(n = 10)
+
+exploratory_results %>% 
+  pull_workflow_set_result(id = "recipe_pars_rad_svm") %>% 
+  collect_metrics() %>% 
+  arrange(mean) %>% 
+  slice_head(n = 10)
+```
+
+#### Final Fit
+
+```{r}
+set.seed(1993)
+best_model <- svm_rbf(cost = 7.5946669, rbf_sigma = 0.00144719017, margin = 0.010112632) %>% 
+  set_engine("kernlab") %>% 
+  set_mode("regression")
+
+workflow() %>% 
+  add_recipe(recipe_all) %>% 
+  add_model(best_model) %>% 
+  fit(train) %>% 
+  predict(new_data = test) %>% 
+  bind_cols(Id = test$Id) %>% 
+  mutate(SalePrice = exp(.pred)) %>% 
+  select(-.pred) %>% 
+  write_csv("SVM_Rad_All_NULL.csv")
+```
+
+```{r}
+set.seed(1993)
+best_model <- svm_rbf(cost = 7.5946669, rbf_sigma = 0.00144719017, margin = 0.010112632) %>% 
+  set_engine("kernlab") %>% 
+  set_mode("regression")
+
+workflow() %>% 
+  add_recipe(recipe_pars) %>% 
+  add_model(best_model) %>% 
+  fit(train) %>% 
+  predict(new_data = test) %>% 
+  bind_cols(Id = test$Id) %>% 
+  mutate(SalePrice = exp(.pred)) %>% 
+  select(-.pred) %>% 
+  write_csv("SVM_Rad_Pars_NULL.csv")
+```
+
+### Cubist Rules
+
+Nearest Neighbors is really affecting the results. It seems like higher the better.
+
+```{r, fig.height=7, fig.width=8}
+plot_compare("recipe_all_cubist_rules",
+             "recipe_pars_cubist_rules")
+```
+
+
+```{r}
+exploratory_results %>% 
+  pull_workflow_set_result(id = "recipe_all_cubist_rules") %>% 
+  collect_metrics() %>% 
+  arrange(mean) %>% 
+  slice_head(n = 10)
+
+exploratory_results %>% 
+  pull_workflow_set_result(id = "recipe_pars_cubist_rules") %>% 
+  collect_metrics() %>% 
+  arrange(mean) %>% 
+  slice_head(n = 10)
+```
+
+#### Final Fit
+
+```{r}
+set.seed(1993)
+best_model <- cubist_rules(committees = 91, neighbors = 9, max_rules = 365) %>% 
+  set_engine("Cubist") %>% 
+  set_mode("regression")
+
+workflow() %>% 
+  add_recipe(recipe_all) %>% 
+  add_model(best_model) %>% 
+  fit(train) %>% 
+  predict(new_data = test) %>% 
+  bind_cols(Id = test$Id) %>% 
+  mutate(SalePrice = exp(.pred)) %>% 
+  select(-.pred) %>% 
+  write_csv("Cubist_All_NULL.csv")
+```
+
+```{r}
+set.seed(1993)
+best_model <- cubist_rules(committees = 67, neighbors = 10, max_rules = 442) %>% 
+  set_engine("Cubist") %>% 
+  set_mode("regression")
+
+workflow() %>% 
+  add_recipe(recipe_pars) %>% 
+  add_model(best_model) %>% 
+  fit(train) %>% 
+  predict(new_data = test) %>% 
+  bind_cols(Id = test$Id) %>% 
+  mutate(SalePrice = exp(.pred)) %>% 
+  select(-.pred) %>% 
+  write_csv("Cubist_Pars_NULL.csv")
+```
+
+### Linear Regression with Regularization
+
+```{r, fig.height=7, fig.width=8}
+plot_compare("recipe_all_linear_reg",
+             "recipe_pars_linear_reg")
+```
+
+
+```{r}
+exploratory_results %>% 
+  pull_workflow_set_result(id = "recipe_all_linear_reg") %>% 
+  collect_metrics() %>% 
+  arrange(mean) %>% 
+  slice_head(n = 10)
+
+exploratory_results %>% 
+  pull_workflow_set_result(id = "recipe_pars_linear_reg") %>% 
+  collect_metrics() %>% 
+  arrange(mean) %>% 
+  slice_head(n = 10)
+```
+
+#### Final Fit
+
+```{r}
+set.seed(1993)
+best_model <- linear_reg(penalty = 0.00001222794, mixture = 0.005317853) %>% 
+  set_engine("glmnet") %>% 
+  set_mode("regression")
+
+workflow() %>% 
+  add_recipe(recipe_all) %>% 
+  add_model(best_model) %>% 
+  fit(train) %>% 
+  predict(new_data = test) %>% 
+  bind_cols(Id = test$Id) %>% 
+  mutate(SalePrice = exp(.pred)) %>% 
+  select(-.pred) %>% 
+  write_csv("LinReg_All_NULL.csv")
+```
+
+```{r}
+set.seed(1993)
+best_model <- linear_reg(penalty = 0.00001222794, mixture = 0.005317853) %>% 
+  set_engine("glmnet") %>% 
+  set_mode("regression")
+
+workflow() %>% 
+  add_recipe(recipe_pars) %>% 
+  add_model(best_model) %>% 
+  fit(train) %>% 
+  predict(new_data = test) %>% 
+  bind_cols(Id = test$Id) %>% 
+  mutate(SalePrice = exp(.pred)) %>% 
+  select(-.pred) %>% 
+  write_csv("LinReg_Pars_NULL.csv")
+```
+
+### MARS
+
+```{r, fig.height=8, fig.width=8}
+plot_compare("recipe_all_MARS",
+             "recipe_pars_MARS")
+```
+
+
+```{r}
+exploratory_results %>% 
+  pull_workflow_set_result(id = "recipe_all_MARS") %>% 
+  collect_metrics() %>% 
+  arrange(mean) %>% 
+  slice_head(n = 10)
+
+exploratory_results %>% 
+  pull_workflow_set_result(id = "recipe_pars_MARS") %>% 
+  collect_metrics() %>% 
+  arrange(mean) %>% 
+  slice_head(n = 10)
+```
+
+
+# Test Results
+
+I had to re-run the notebook in order to be able to add this section. I set the seed and I hope results will be the same in the second run.
+
+#### XGBoost
+
+**All CV Result:** 0.13421
+
+**All Kaggle Result:** 0.14020
+
+**Parsimonious CV Result:** 0.13578
+
+**Parsimonious Kaggle Result:** 0.13999
+
+-------
+
+#### Neural Nets
+
+**All CV Result:** 0.13344
+
+**All Kaggle Result:** 0.13839
+
+**Parsimonious CV Result:** 0.13423
+
+**Parsimonious Kaggle Result:** 0.14031
+
+-------
+
+#### Radial SVM
+
+**All CV Result:** 0.13134
+
+**All Kaggle Result:** 0.13818
+
+**Parsimonious CV Result:** 0.13261
+
+**Parsimonious Kaggle Result:** 0.13911
+
+-------
+
+#### Cubist Rules
+
+**All CV Result:** 0.13243
+
+**All Kaggle Result:** 0.14215
+
+**Parsimonious CV Result:** 0.13444
+
+**Parsimonious Kaggle Result:** 0.14325
+
+-------
+
+#### Linear Regression with Regularization
+
+**All CV Result:** 0.13364
+
+**All Kaggle Result:** 0.13951
+
+**Parsimonious CV Result:** 0.13470
+
+**Parsimonious Kaggle Result:** 0.14198
+
+-------
+
+It is nice to see that test and train results are close. This way I know that I didn't do anything to overfit. Cubist Rules is also out. When I come back for the second part I will only work with XGBoost, Neural Nets, SVM and Linear Regression.
+
+
+
+
+
+
+
+
+
